@@ -41,7 +41,7 @@ kc_api() {
   shift 2
   local token
   token=$(get_kc_token)
-  curl -sf -X "${method}" \
+  curl -s -X "${method}" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
     "${KEYCLOAK_URL}/admin/realms/${KC_REALM}${path}" "$@"
@@ -408,14 +408,16 @@ echo "[setup] Keycloak API is up."
 ###############################################
 echo "[setup] Configuring Keycloak realm..."
 KC_TOKEN=$(get_kc_token)
+echo "[setup] Got Keycloak token: ${KC_TOKEN:0:20}..."
 
 REALM_EXISTS=$(curl -s -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer ${KC_TOKEN}" \
   "${KEYCLOAK_URL}/admin/realms/${KC_REALM}")
+echo "[setup] Realm check status: ${REALM_EXISTS}"
 
 if [ "$REALM_EXISTS" != "200" ]; then
   echo "[setup] Creating realm '${KC_REALM}'..."
-  curl -sf -X POST \
+  REALM_CREATE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     -H "Authorization: Bearer ${KC_TOKEN}" \
     -H "Content-Type: application/json" \
     "${KEYCLOAK_URL}/admin/realms" \
@@ -424,7 +426,11 @@ if [ "$REALM_EXISTS" != "200" ]; then
       "enabled": true,
       "registrationAllowed": false,
       "loginWithEmailAllowed": true
-    }'
+    }')
+  echo "[setup] Realm creation status: ${REALM_CREATE_STATUS}"
+  if [ "$REALM_CREATE_STATUS" != "201" ] && [ "$REALM_CREATE_STATUS" != "409" ]; then
+    echo "[setup] WARNING: Realm creation returned ${REALM_CREATE_STATUS}"
+  fi
 fi
 
 ###############################################
