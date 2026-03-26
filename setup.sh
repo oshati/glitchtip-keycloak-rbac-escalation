@@ -28,11 +28,13 @@ KC_ADMIN_PASS="changeme"
 KC_REALM="devops"
 
 get_kc_token() {
-  curl -sf -X POST "${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token" \
+  local response
+  response=$(curl -s -X POST "${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token" \
     -d "client_id=admin-cli" \
     -d "grant_type=password" \
     -d "username=${KC_ADMIN_USER}" \
-    -d "password=${KC_ADMIN_PASS}" | jq -r '.access_token'
+    -d "password=${KC_ADMIN_PASS}" 2>&1)
+  echo "$response" | jq -r '.access_token // empty'
 }
 
 kc_api() {
