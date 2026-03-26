@@ -652,9 +652,9 @@ if not admin:
     admin = User.objects.create_superuser(email='admin@devops.local', password='GlitchAdmin2024!')
 
 # Create org
-from organizations_ext.models import Organization, OrganizationUser
+from apps.organizations_ext.models import Organization, OrganizationUser
 org, _ = Organization.objects.get_or_create(name='DevOps Platform')
-OrganizationUser.objects.get_or_create(organization=org, user=admin, defaults={'role': 0})
+OrganizationUser.objects.get_or_create(organization=org, user=admin, defaults={'role': 3})
 
 # Create users — ALL as owners (breakage)
 for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
@@ -666,9 +666,9 @@ for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
         user.set_password('DevOps2024!')
         user.save()
     ou, _ = OrganizationUser.objects.get_or_create(
-        organization=org, user=user, defaults={'role': 0}
+        organization=org, user=user, defaults={'role': 3}
     )
-    ou.role = 0  # owner — THIS IS THE BREAKAGE
+    ou.role = 3  # 3=owner — THIS IS THE BREAKAGE
     ou.save()
 
 print('GlitchTip users configured.')

@@ -157,9 +157,8 @@ kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
 }'
 
 # Restart GlitchTip to pick up config changes
-GT_DEPLOY=$(kubectl get deployments -n glitchtip -o jsonpath='{.items[0].metadata.name}')
-kubectl rollout restart deployment "${GT_DEPLOY}" -n glitchtip
-kubectl rollout status deployment "${GT_DEPLOY}" -n glitchtip --timeout=180s
+kubectl rollout restart deployment glitchtip-web -n glitchtip
+kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s
 
 # Wait for GlitchTip to be healthy
 for i in $(seq 1 60); do
@@ -183,18 +182,18 @@ kubectl wait --for=condition=ready pod "${GT_POD}" -n glitchtip --timeout=120s
 # Use Django management shell to fix roles
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
 from django.contrib.auth import get_user_model
-from organizations_ext.models import OrganizationUser
+from apps.organizations_ext.models import OrganizationUser
 
 User = get_user_model()
 
-# Demote charlie, diana, eve to member (role=3)
+# Demote charlie, diana, eve to member (role=0)
 for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
     try:
         user = User.objects.get(email=email)
         org_users = OrganizationUser.objects.filter(user=user)
         for ou in org_users:
-            if ou.role == 0:  # owner
-                ou.role = 3   # member
+            if ou.role == 3:  # owner
+                ou.role = 0   # member
                 ou.save()
                 print(f'Demoted {email} from owner to member')
     except User.DoesNotExist:

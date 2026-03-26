@@ -225,7 +225,7 @@ def check_user_roles_demoted(setup_info):
     check_script = """
 import json
 from django.contrib.auth import get_user_model
-from organizations_ext.models import OrganizationUser
+from apps.organizations_ext.models import OrganizationUser
 
 User = get_user_model()
 results = {}
@@ -235,8 +235,8 @@ for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
         user = User.objects.get(email=email)
         org_users = OrganizationUser.objects.filter(user=user)
         roles = [ou.role for ou in org_users]
-        # role 0 = owner, role 1 = member/admin, role 2 = member
-        results[email] = {'roles': roles, 'is_owner': 0 in roles}
+        # role 0 = member, 1 = admin, 2 = manager, 3 = owner
+        results[email] = {'roles': roles, 'is_owner': 3 in roles}
     except User.DoesNotExist:
         results[email] = {'roles': [], 'is_owner': False, 'error': 'not found'}
 
