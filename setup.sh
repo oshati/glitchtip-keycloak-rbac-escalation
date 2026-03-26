@@ -122,10 +122,10 @@ kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/nul
 kubectl create namespace glitchtip 2>/dev/null || true
 echo "[setup] Deploying GlitchTip stack..."
 
-GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
-GT_DB_PASS="glitchtip-db-$(head -c 8 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
+GT_SECRET_KEY="gt-secret-key-abc123def456"
+GT_DB_PASS="glitchtipdb99"
 
-kubectl apply --validate=false -f - <<'GLITCHTIP_RESOURCES'
+kubectl apply --validate=false -f - <<GLITCHTIP_RESOURCES
 apiVersion: v1
 kind: Secret
 metadata:
@@ -133,8 +133,8 @@ metadata:
   namespace: glitchtip
 type: Opaque
 stringData:
-  SECRET_KEY: "PLACEHOLDER_SECRET_KEY"
-  DATABASE_URL: "postgres://glitchtip:PLACEHOLDER_DB_PASS@glitchtip-postgres:5432/glitchtip"
+  SECRET_KEY: "${GT_SECRET_KEY}"
+  DATABASE_URL: "postgres://glitchtip:${GT_DB_PASS}@glitchtip-postgres:5432/glitchtip"
   DJANGO_SUPERUSER_EMAIL: "admin@devops.local"
   DJANGO_SUPERUSER_PASSWORD: "GlitchAdmin2024!"
 ---
@@ -160,7 +160,7 @@ metadata:
 data:
   init.sql: |
     CREATE DATABASE glitchtip;
-    CREATE USER glitchtip WITH PASSWORD 'PLACEHOLDER_DB_PASS';
+    CREATE USER glitchtip WITH PASSWORD '${GT_DB_PASS}';
     GRANT ALL PRIVILEGES ON DATABASE glitchtip TO glitchtip;
     ALTER DATABASE glitchtip OWNER TO glitchtip;
 ---
@@ -192,7 +192,7 @@ spec:
         - name: POSTGRES_USER
           value: "glitchtip"
         - name: POSTGRES_PASSWORD
-          value: "PLACEHOLDER_DB_PASS"
+          value: "${GT_DB_PASS}"
         - name: POSTGRES_DB
           value: "glitchtip"
         volumeMounts:
@@ -379,20 +379,9 @@ spec:
               number: 80
 GLITCHTIP_RESOURCES
 
-# Patch secrets/configs with actual generated values
-kubectl get secret glitchtip-secrets -n glitchtip -o json | \
-  jq --arg sk "$GT_SECRET_KEY" --arg dbp "$GT_DB_PASS" \
-  '.data["SECRET_KEY"] = ($sk | @base64) | .data["DATABASE_URL"] = ("postgres://glitchtip:" + $dbp + "@glitchtip-postgres:5432/glitchtip" | @base64) ' | \
-  kubectl apply -f -
-
-kubectl get statefulset glitchtip-postgres -n glitchtip -o json | \
-  jq --arg dbp "$GT_DB_PASS" \
-  '.spec.template.spec.containers[0].env[] |= if .name == "POSTGRES_PASSWORD" then .value = $dbp else . end' | \
-  kubectl apply -f -
-
 echo "[setup] Waiting for PostgreSQL to be ready..."
-kubectl rollout status statefulset/glitchtip-postgres -n glitchtip --timeout=120s
-kubectl wait --for=condition=ready pod -l app=glitchtip-postgres -n glitchtip --timeout=120s
+kubectl rollout status statefulset/glitchtip-postgres -n glitchtip --timeout=300s
+kubectl wait --for=condition=ready pod -l app=glitchtip-postgres -n glitchtip --timeout=300s
 
 echo "[setup] Waiting for Redis to be ready..."
 kubectl rollout status deployment/glitchtip-redis -n glitchtip --timeout=120s
