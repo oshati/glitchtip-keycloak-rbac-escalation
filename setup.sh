@@ -119,6 +119,7 @@ kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/nul
 ###############################################
 # DEPLOY GLITCHTIP STACK
 ###############################################
+kubectl create namespace glitchtip 2>/dev/null || true
 echo "[setup] Deploying GlitchTip stack..."
 
 GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
