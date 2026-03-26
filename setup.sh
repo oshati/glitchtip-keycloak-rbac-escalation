@@ -70,9 +70,9 @@ for img in /opt/images/*.tar; do
     k3s ctr images import "$img" 2>&1 || echo "[setup] WARNING: Failed to import $(basename "$img")"
   fi
 done
-echo "[setup] Verifying imported images..."
-ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep -E "glitchtip|postgres|redis|curl" || \
-  k3s ctr images ls | grep -E "glitchtip|postgres|redis|curl" || echo "[setup] WARNING: Some images may not be imported"
+echo "[setup] Verifying images available..."
+ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls -q 2>/dev/null | grep -E "glitchtip|postgres|redis|curl" || \
+  echo "[setup] WARNING: Some images may not be available"
 echo "[setup] Images imported."
 
 ###############################################
@@ -155,7 +155,7 @@ spec:
     spec:
       containers:
       - name: postgres
-        image: docker.io/library/postgres:15-alpine
+        image: docker.io/library/postgres:16-alpine
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5432
