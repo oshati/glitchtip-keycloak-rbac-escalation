@@ -88,10 +88,17 @@ for ns in bleater monitoring observability harbor argocd mattermost; do
   done
 done
 
-# Wait for k3s API to stabilize after mass scale-down
+# Wait for k3s API to fully stabilize after mass scale-down
 echo "[setup] Waiting for k3s API to stabilize..."
-until kubectl get nodes >/dev/null 2>&1; do sleep 3; done
+sleep 15
+until kubectl get nodes >/dev/null 2>&1; do
+  echo "[setup] k3s API not ready, waiting..."
+  sleep 5
+done
+# Double-check stability — ensure API stays up
 sleep 10
+until kubectl get nodes >/dev/null 2>&1; do sleep 3; done
+echo "[setup] k3s API stable."
 
 # Disable ingress-nginx admission webhook (can be broken after scale-down)
 kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
