@@ -62,18 +62,31 @@ kc_api_raw() {
 }
 
 ###############################################
-# VERIFY CONTAINER IMAGES (auto-imported by k3s from /var/lib/rancher/k3s/agent/images/)
+# IMPORT CONTAINER IMAGES
+# Auto-import may not work reliably, so manually import with retries
 ###############################################
-echo "[setup] Waiting for k3s to auto-import images..."
-for i in $(seq 1 60); do
-  if ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls -q 2>/dev/null | grep -q "glitchtip"; then
-    echo "[setup] GlitchTip image available."
-    break
-  fi
-  sleep 5
+echo "[setup] Importing container images..."
+CTR="ctr --address /run/k3s/containerd/containerd.sock -n k8s.io"
+
+# Wait for containerd socket to be available
+until [ -S /run/k3s/containerd/containerd.sock ]; do sleep 2; done
+sleep 5
+
+for img in /var/lib/rancher/k3s/agent/images/*.tar; do
+  imgname=$(basename "$img")
+  echo "[setup] Importing ${imgname}..."
+  for attempt in $(seq 1 5); do
+    if $CTR images import "$img" 2>&1; then
+      echo "[setup] ${imgname} imported successfully."
+      break
+    fi
+    echo "[setup] Retry ${attempt}/5 for ${imgname}..."
+    sleep 10
+  done
 done
-ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls -q 2>/dev/null | grep -E "glitchtip|curl" || \
-  echo "[setup] WARNING: Some images may not be available yet"
+
+echo "[setup] Verifying images..."
+$CTR images ls -q 2>/dev/null | grep -E "glitchtip|curl" || echo "[setup] WARNING: Some images missing"
 
 ###############################################
 # SCALE DOWN NON-ESSENTIAL WORKLOADS
