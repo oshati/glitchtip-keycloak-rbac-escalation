@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 
 ###############################################
 # ENVIRONMENT SETUP
@@ -65,9 +65,14 @@ kc_api_raw() {
 echo "[setup] Importing container images into k3s..."
 for img in /opt/images/*.tar; do
   echo "[setup] Importing $(basename "$img")..."
-  ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images import "$img" 2>/dev/null || \
-  k3s ctr images import "$img" 2>/dev/null || true
+  if ! ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images import "$img" 2>&1; then
+    echo "[setup] Trying k3s ctr..."
+    k3s ctr images import "$img" 2>&1 || echo "[setup] WARNING: Failed to import $(basename "$img")"
+  fi
 done
+echo "[setup] Verifying imported images..."
+ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep -E "glitchtip|postgres|redis|curl" || \
+  k3s ctr images ls | grep -E "glitchtip|postgres|redis|curl" || echo "[setup] WARNING: Some images may not be imported"
 echo "[setup] Images imported."
 
 ###############################################
@@ -75,10 +80,10 @@ echo "[setup] Images imported."
 ###############################################
 echo "[setup] Scaling down non-essential workloads..."
 for ns in bleater monitoring observability harbor argocd mattermost; do
-  kubectl get deployments -n "$ns" -o name 2>/dev/null | while read -r dep; do
+  for dep in $(kubectl get deployments -n "$ns" -o name 2>/dev/null); do
     kubectl scale "$dep" -n "$ns" --replicas=0 2>/dev/null || true
   done
-  kubectl get statefulsets -n "$ns" -o name 2>/dev/null | while read -r sts; do
+  for sts in $(kubectl get statefulsets -n "$ns" -o name 2>/dev/null); do
     kubectl scale "$sts" -n "$ns" --replicas=0 2>/dev/null || true
   done
 done
