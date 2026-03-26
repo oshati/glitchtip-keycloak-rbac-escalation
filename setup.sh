@@ -93,8 +93,8 @@ done
 ###############################################
 echo "[setup] Deploying GlitchTip stack..."
 
-GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | xxd -p)"
-GT_DB_PASS="glitchtip-db-$(head -c 8 /dev/urandom | xxd -p)"
+GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
+GT_DB_PASS="glitchtip-db-$(head -c 8 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
 
 kubectl apply -f - <<'GLITCHTIP_RESOURCES'
 apiVersion: v1
@@ -425,7 +425,7 @@ fi
 # KEYCLOAK: CREATE OIDC CLIENT
 ###############################################
 echo "[setup] Creating OIDC client for GlitchTip..."
-GLITCHTIP_CLIENT_SECRET="gt-oidc-secret-$(head -c 16 /dev/urandom | xxd -p)"
+GLITCHTIP_CLIENT_SECRET="gt-oidc-secret-$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
 
 EXISTING_CLIENT=$(kc_api GET "/clients?clientId=glitchtip" 2>/dev/null || echo "[]")
 CLIENT_UUID=$(echo "$EXISTING_CLIENT" | jq -r '.[0].id // empty')
