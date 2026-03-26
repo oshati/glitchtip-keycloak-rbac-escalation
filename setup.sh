@@ -113,6 +113,16 @@ sleep 10
 until kubectl get nodes >/dev/null 2>&1; do sleep 3; done
 echo "[setup] k3s API stable."
 
+# Remove any taints that prevent scheduling (scale-down can cause unreachable taints)
+NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+kubectl taint node "$NODE_NAME" node.kubernetes.io/unreachable- 2>/dev/null || true
+kubectl taint node "$NODE_NAME" node.kubernetes.io/not-ready- 2>/dev/null || true
+kubectl taint node "$NODE_NAME" node.kubernetes.io/disk-pressure- 2>/dev/null || true
+echo "[setup] Node taints cleared."
+
+# Wait for node to be fully Ready
+until kubectl get nodes | grep -q " Ready"; do sleep 3; done
+
 # Disable ingress-nginx admission webhook (can be broken after scale-down)
 kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
 
