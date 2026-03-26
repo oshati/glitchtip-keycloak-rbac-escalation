@@ -1,6 +1,9 @@
 #!/bin/bash
 set -eo pipefail
 
+# Force line-buffered output so progress is visible
+exec 1> >(stdbuf -oL cat) 2>&1
+
 ###############################################
 # ENVIRONMENT SETUP
 # Base image entrypoint already started
