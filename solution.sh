@@ -14,7 +14,7 @@ get_kc_token() {
     -d "client_id=admin-cli" \
     -d "grant_type=password" \
     -d "username=admin" \
-    -d "password=changeme" | jq -r '.access_token'
+    -d "password=admin123" | jq -r '.access_token'
 }
 
 ###############################################

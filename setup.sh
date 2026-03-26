@@ -24,7 +24,7 @@ chmod 600 /home/ubuntu/.kube/config
 KEYCLOAK_URL="http://keycloak.devops.local:8080"
 GLITCHTIP_URL="http://glitchtip.devops.local"
 KC_ADMIN_USER="admin"
-KC_ADMIN_PASS="changeme"
+KC_ADMIN_PASS="admin123"
 KC_REALM="devops"
 
 get_kc_token() {

@@ -51,7 +51,7 @@ def get_kc_token(setup_info):
     """Get Keycloak admin token."""
     kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
     kc_user = setup_info.get("KC_ADMIN_USER", "admin")
-    kc_pass = setup_info.get("KC_ADMIN_PASS", "changeme")
+    kc_pass = setup_info.get("KC_ADMIN_PASS", "admin123")
 
     rc, stdout, _ = run_cmd(
         f'curl -sf -X POST "{kc_url}/realms/master/protocol/openid-connect/token" '
