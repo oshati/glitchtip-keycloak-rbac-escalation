@@ -86,6 +86,11 @@ for ns in bleater monitoring observability harbor argocd mattermost; do
   done
 done
 
+# Wait for k3s API to stabilize after mass scale-down
+echo "[setup] Waiting for k3s API to stabilize..."
+until kubectl get nodes >/dev/null 2>&1; do sleep 3; done
+sleep 10
+
 ###############################################
 # DEPLOY GLITCHTIP STACK
 ###############################################
@@ -94,7 +99,7 @@ echo "[setup] Deploying GlitchTip stack..."
 GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
 GT_DB_PASS="glitchtip-db-$(head -c 8 /dev/urandom | od -A n -t x1 | tr -d ' \n')"
 
-kubectl apply -f - <<'GLITCHTIP_RESOURCES'
+kubectl apply --validate=false -f - <<'GLITCHTIP_RESOURCES'
 apiVersion: v1
 kind: Secret
 metadata:
