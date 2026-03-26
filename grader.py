@@ -54,7 +54,7 @@ def get_kc_token(setup_info):
     kc_pass = setup_info.get("KC_ADMIN_PASS", "admin123")
 
     rc, stdout, _ = run_cmd(
-        f'curl -sf -X POST "{kc_url}/realms/master/protocol/openid-connect/token" '
+        f'curl -s -X POST "{kc_url}/realms/master/protocol/openid-connect/token" '
         f'-d "client_id=admin-cli" '
         f'-d "grant_type=password" '
         f'-d "username={kc_user}" '
@@ -221,30 +221,32 @@ def check_user_roles_demoted(setup_info):
         return 0.0, "No GlitchTip pod found"
 
     # Query Django ORM for user roles
-    check_script = """
-import json
-from django.contrib.auth import get_user_model
-from apps.organizations_ext.models import OrganizationUser
+    # Write check script to a temp file, copy to pod, execute
+    check_script = (
+        'import json\n'
+        'from django.contrib.auth import get_user_model\n'
+        'from apps.organizations_ext.models import OrganizationUser\n'
+        'User = get_user_model()\n'
+        'results = {}\n'
+        'for email in ["charlie@devops.local", "diana@devops.local", "eve@devops.local"]:\n'
+        '    try:\n'
+        '        user = User.objects.get(email=email)\n'
+        '        org_users = OrganizationUser.objects.filter(user=user)\n'
+        '        roles = [ou.role for ou in org_users]\n'
+        '        results[email] = {"roles": roles, "is_owner": 3 in roles}\n'
+        '    except User.DoesNotExist:\n'
+        '        results[email] = {"roles": [], "is_owner": False, "error": "not found"}\n'
+        'print(json.dumps(results))\n'
+    )
 
-User = get_user_model()
-results = {}
+    # Write script to file, copy into pod, run it
+    with open("/tmp/gt_check_roles.py", "w") as f:
+        f.write(check_script)
 
-for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
-    try:
-        user = User.objects.get(email=email)
-        org_users = OrganizationUser.objects.filter(user=user)
-        roles = [ou.role for ou in org_users]
-        # role 0 = member, 1 = admin, 2 = manager, 3 = owner
-        results[email] = {'roles': roles, 'is_owner': 3 in roles}
-    except User.DoesNotExist:
-        results[email] = {'roles': [], 'is_owner': False, 'error': 'not found'}
-
-print(json.dumps(results))
-"""
+    run_cmd(f"kubectl cp /tmp/gt_check_roles.py glitchtip/{gt_pod}:/tmp/gt_check_roles.py", timeout=10)
 
     rc, stdout, stderr = run_cmd(
-        f"kubectl exec -n glitchtip {gt_pod} -- python manage.py shell -c "
-        f"'{check_script}'",
+        f"kubectl exec -n glitchtip {gt_pod} -- bash -c 'cd /code && python manage.py shell < /tmp/gt_check_roles.py'",
         timeout=30,
     )
 
@@ -279,6 +281,7 @@ print(json.dumps(results))
 
 def grade(*args, **kwargs) -> GradingResult:
     """Main grading function."""
+    os.environ["KUBECONFIG"] = "/etc/rancher/k3s/k3s.yaml"
     setup_info = load_setup_info()
 
     # Pre-cleanup: kill any ubuntu background processes
