@@ -49,7 +49,7 @@ def load_setup_info():
 
 def get_kc_token(setup_info):
     """Get Keycloak admin token."""
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local")
+    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
     kc_user = setup_info.get("KC_ADMIN_USER", "admin")
     kc_pass = setup_info.get("KC_ADMIN_PASS", "changeme")
 
@@ -73,7 +73,7 @@ def check_keycloak_groups_correct(setup_info):
     Check that ONLY alice and bob are members of /platform-eng/glitchtip-owners.
     Score: 1.0 if exactly {alice, bob}, 0.0 otherwise.
     """
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local")
+    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
     realm = setup_info.get("KC_REALM", "devops")
     owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
 
@@ -166,7 +166,7 @@ def check_network_connectivity(setup_info):
     """
     # Find a GlitchTip pod
     rc, gt_pod, _ = run_cmd(
-        "kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip "
+        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
         "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
     )
 
@@ -181,7 +181,7 @@ def check_network_connectivity(setup_info):
         return 0.0, "No GlitchTip pod found"
 
     # Poll with retries
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local")
+    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
     realm = setup_info.get("KC_REALM", "devops")
 
     for attempt in range(10):
@@ -207,7 +207,7 @@ def check_user_roles_demoted(setup_info):
     """
     # Find GlitchTip pod
     rc, gt_pod, _ = run_cmd(
-        "kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip "
+        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
         "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
     )
 

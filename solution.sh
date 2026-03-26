@@ -3,7 +3,7 @@ set -e
 
 export KUBECONFIG=/home/ubuntu/.kube/config
 
-KEYCLOAK_URL="http://keycloak.devops.local"
+KEYCLOAK_URL="http://keycloak.devops.local:8080"
 GLITCHTIP_URL="http://glitchtip.devops.local"
 
 ###############################################
@@ -66,7 +66,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: glitchtip
+      app: glitchtip
   policyTypes:
   - Egress
   egress:
@@ -94,11 +94,10 @@ echo "[solution] NetworkPolicy fixed."
 
 # Verify connectivity
 echo "[solution] Verifying GlitchTip → Keycloak connectivity..."
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-         kubectl get pods -n glitchtip -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
 
 for i in $(seq 1 30); do
-  if kubectl exec -n glitchtip "${GT_POD}" -- curl -sf "http://keycloak.devops.local/realms/master" >/dev/null 2>&1; then
+  if kubectl exec -n glitchtip "${GT_POD}" -- curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then
     echo "[solution] Connectivity confirmed."
     break
   fi
@@ -176,8 +175,7 @@ echo "[solution] GlitchTip OIDC config fixed and deployment restarted."
 ###############################################
 echo "[solution] Step 5: Demoting over-privileged users in GlitchTip..."
 
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-         kubectl get pods -n glitchtip -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
 
 # Wait for pod to be ready
 kubectl wait --for=condition=ready pod "${GT_POD}" -n glitchtip --timeout=120s
@@ -189,14 +187,14 @@ from organizations_ext.models import OrganizationUser
 
 User = get_user_model()
 
-# Demote charlie, diana, eve to member (role=1)
+# Demote charlie, diana, eve to member (role=3)
 for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
     try:
         user = User.objects.get(email=email)
         org_users = OrganizationUser.objects.filter(user=user)
         for ou in org_users:
             if ou.role == 0:  # owner
-                ou.role = 1   # member
+                ou.role = 3   # member
                 ou.save()
                 print(f'Demoted {email} from owner to member')
     except User.DoesNotExist:
@@ -237,9 +235,8 @@ echo "[solution] OIDC scope: ${SCOPE}"
 echo "[solution] Owner group: ${OWNER_GROUP}"
 
 # Check 4: Network connectivity
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-         kubectl get pods -n glitchtip -o jsonpath='{.items[0].metadata.name}')
-if kubectl exec -n glitchtip "${GT_POD}" -- curl -sf "http://keycloak.devops.local/realms/master" >/dev/null 2>&1; then
+GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+if kubectl exec -n glitchtip "${GT_POD}" -- curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then
   echo "[solution] Network connectivity: OK"
 else
   echo "[solution] Network connectivity: FAILED"

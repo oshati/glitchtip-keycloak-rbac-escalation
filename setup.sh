@@ -2,9 +2,10 @@
 set -euo pipefail
 
 ###############################################
-# BOILERPLATE — DO NOT MODIFY
+# ENVIRONMENT SETUP
+# Base image entrypoint already started
+# supervisord + k3s. We just configure.
 ###############################################
-/usr/bin/supervisord -c /etc/supervisord.conf &
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 echo "[setup] Waiting for k3s node to be Ready..."
@@ -20,7 +21,7 @@ chmod 600 /home/ubuntu/.kube/config
 ###############################################
 # HELPER FUNCTIONS
 ###############################################
-KEYCLOAK_URL="http://keycloak.devops.local"
+KEYCLOAK_URL="http://keycloak.devops.local:8080"
 GLITCHTIP_URL="http://glitchtip.devops.local"
 KC_ADMIN_USER="admin"
 KC_ADMIN_PASS="changeme"
@@ -59,36 +60,20 @@ kc_api_raw() {
 }
 
 ###############################################
-# WAIT FOR SERVICES
+# IMPORT CONTAINER IMAGES INTO K3S
 ###############################################
-echo "[setup] Waiting for Keycloak pods..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=keycloak -n keycloak --timeout=300s 2>/dev/null || \
-kubectl wait --for=condition=ready pod -l app=keycloak -n keycloak --timeout=300s 2>/dev/null || true
-sleep 10
-
-echo "[setup] Waiting for Keycloak API to respond..."
-until curl -sf "${KEYCLOAK_URL}/realms/master" >/dev/null 2>&1; do sleep 3; done
-echo "[setup] Keycloak API is up."
-
-echo "[setup] Waiting for GlitchTip pods..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=glitchtip -n glitchtip --timeout=300s 2>/dev/null || \
-kubectl wait --for=condition=ready pod -l app=glitchtip -n glitchtip --timeout=300s 2>/dev/null || true
-sleep 5
-
-echo "[setup] Waiting for GlitchTip API to respond..."
-for i in $(seq 1 60); do
-  if curl -sf "${GLITCHTIP_URL}/api/0/" >/dev/null 2>&1 || \
-     curl -sf -o /dev/null -w "%{http_code}" "${GLITCHTIP_URL}" 2>/dev/null | grep -qE "^(200|301|302)"; then
-    break
-  fi
-  sleep 5
+echo "[setup] Importing container images into k3s..."
+for img in /opt/images/*.tar; do
+  echo "[setup] Importing $(basename "$img")..."
+  ctr --address /run/k3s/containerd/containerd.sock -n k8s.io images import "$img" 2>/dev/null || \
+  k3s ctr images import "$img" 2>/dev/null || true
 done
-echo "[setup] GlitchTip is up."
+echo "[setup] Images imported."
 
 ###############################################
 # SCALE DOWN NON-ESSENTIAL WORKLOADS
 ###############################################
-echo "[setup] Scaling down non-essential workloads for CPU headroom..."
+echo "[setup] Scaling down non-essential workloads..."
 for ns in bleater monitoring observability harbor argocd mattermost; do
   kubectl get deployments -n "$ns" -o name 2>/dev/null | while read -r dep; do
     kubectl scale "$dep" -n "$ns" --replicas=0 2>/dev/null || true
@@ -99,12 +84,320 @@ for ns in bleater monitoring observability harbor argocd mattermost; do
 done
 
 ###############################################
+# DEPLOY GLITCHTIP STACK
+###############################################
+echo "[setup] Deploying GlitchTip stack..."
+
+GT_SECRET_KEY="gt-secret-key-$(head -c 16 /dev/urandom | xxd -p)"
+GT_DB_PASS="glitchtip-db-$(head -c 8 /dev/urandom | xxd -p)"
+
+kubectl apply -f - <<'GLITCHTIP_RESOURCES'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: glitchtip-secrets
+  namespace: glitchtip
+type: Opaque
+stringData:
+  SECRET_KEY: "PLACEHOLDER_SECRET_KEY"
+  DATABASE_URL: "postgres://glitchtip:PLACEHOLDER_DB_PASS@glitchtip-postgres:5432/glitchtip"
+  DJANGO_SUPERUSER_EMAIL: "admin@devops.local"
+  DJANGO_SUPERUSER_PASSWORD: "GlitchAdmin2024!"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-config
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+data:
+  GLITCHTIP_DOMAIN: "http://glitchtip.devops.local"
+  DEFAULT_FROM_EMAIL: "noreply@devops.local"
+  EMAIL_URL: "consolemail://"
+  CELERY_WORKER_AUTOSCALE: "1,3"
+  CELERY_WORKER_MAX_TASKS_PER_CHILD: "10000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-postgres-init
+  namespace: glitchtip
+data:
+  init.sql: |
+    CREATE DATABASE glitchtip;
+    CREATE USER glitchtip WITH PASSWORD 'PLACEHOLDER_DB_PASS';
+    GRANT ALL PRIVILEGES ON DATABASE glitchtip TO glitchtip;
+    ALTER DATABASE glitchtip OWNER TO glitchtip;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: glitchtip-postgres
+  namespace: glitchtip
+  labels:
+    app: glitchtip-postgres
+spec:
+  serviceName: glitchtip-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glitchtip-postgres
+  template:
+    metadata:
+      labels:
+        app: glitchtip-postgres
+    spec:
+      containers:
+      - name: postgres
+        image: docker.io/library/postgres:15-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          value: "glitchtip"
+        - name: POSTGRES_PASSWORD
+          value: "PLACEHOLDER_DB_PASS"
+        - name: POSTGRES_DB
+          value: "glitchtip"
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "glitchtip"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glitchtip-postgres
+  namespace: glitchtip
+spec:
+  selector:
+    app: glitchtip-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glitchtip-redis
+  namespace: glitchtip
+  labels:
+    app: glitchtip-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glitchtip-redis
+  template:
+    metadata:
+      labels:
+        app: glitchtip-redis
+    spec:
+      containers:
+      - name: redis
+        image: docker.io/library/redis:7-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glitchtip-redis
+  namespace: glitchtip
+spec:
+  selector:
+    app: glitchtip-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glitchtip-web
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: web
+    app.kubernetes.io/name: glitchtip
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glitchtip
+      component: web
+  template:
+    metadata:
+      labels:
+        app: glitchtip
+        component: web
+        app.kubernetes.io/name: glitchtip
+    spec:
+      containers:
+      - name: glitchtip
+        image: docker.io/glitchtip/glitchtip:v4.1
+        imagePullPolicy: IfNotPresent
+        command: ["./bin/start.sh"]
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: glitchtip-config
+        - secretRef:
+            name: glitchtip-secrets
+        env:
+        - name: REDIS_URL
+          value: "redis://glitchtip-redis:6379/0"
+        - name: PORT
+          value: "8080"
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glitchtip-worker
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: glitchtip
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: glitchtip
+        component: worker
+    spec:
+      containers:
+      - name: worker
+        image: docker.io/glitchtip/glitchtip:v4.1
+        imagePullPolicy: IfNotPresent
+        command: ["celery", "-A", "glitchtip", "worker", "-B", "-l", "info",
+                  "--concurrency", "2", "--max-tasks-per-child", "10000"]
+        envFrom:
+        - configMapRef:
+            name: glitchtip-config
+        - secretRef:
+            name: glitchtip-secrets
+        env:
+        - name: REDIS_URL
+          value: "redis://glitchtip-redis:6379/0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: glitchtip
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+spec:
+  selector:
+    app: glitchtip
+    component: web
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: glitchtip
+  namespace: glitchtip
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: glitchtip.devops.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: glitchtip
+            port:
+              number: 80
+GLITCHTIP_RESOURCES
+
+# Patch secrets/configs with actual generated values
+kubectl get secret glitchtip-secrets -n glitchtip -o json | \
+  jq --arg sk "$GT_SECRET_KEY" --arg dbp "$GT_DB_PASS" \
+  '.data["SECRET_KEY"] = ($sk | @base64) | .data["DATABASE_URL"] = ("postgres://glitchtip:" + $dbp + "@glitchtip-postgres:5432/glitchtip" | @base64) ' | \
+  kubectl apply -f -
+
+kubectl get statefulset glitchtip-postgres -n glitchtip -o json | \
+  jq --arg dbp "$GT_DB_PASS" \
+  '.spec.template.spec.containers[0].env[] |= if .name == "POSTGRES_PASSWORD" then .value = $dbp else . end' | \
+  kubectl apply -f -
+
+echo "[setup] Waiting for PostgreSQL to be ready..."
+kubectl rollout status statefulset/glitchtip-postgres -n glitchtip --timeout=120s
+kubectl wait --for=condition=ready pod -l app=glitchtip-postgres -n glitchtip --timeout=120s
+
+echo "[setup] Waiting for Redis to be ready..."
+kubectl rollout status deployment/glitchtip-redis -n glitchtip --timeout=120s
+
+echo "[setup] Waiting for GlitchTip web to be ready..."
+kubectl rollout status deployment/glitchtip-web -n glitchtip --timeout=300s || true
+
+# Wait for GlitchTip to respond
+echo "[setup] Waiting for GlitchTip HTTP endpoint..."
+for i in $(seq 1 90); do
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GLITCHTIP_URL}" 2>/dev/null || echo "000")
+  if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+    echo "[setup] GlitchTip is responding (HTTP ${HTTP_CODE})."
+    break
+  fi
+  sleep 5
+done
+
+# Run migrations and create superuser
+GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+echo "[setup] Running Django migrations..."
+kubectl exec -n glitchtip "${GT_POD}" -- python manage.py migrate --noinput 2>/dev/null || true
+
+echo "[setup] Creating superuser..."
+kubectl exec -n glitchtip "${GT_POD}" -- python manage.py createsuperuser --noinput 2>/dev/null || true
+
+###############################################
+# WAIT FOR KEYCLOAK
+###############################################
+echo "[setup] Waiting for Keycloak API..."
+until curl -sf "${KEYCLOAK_URL}/realms/master" >/dev/null 2>&1; do sleep 3; done
+echo "[setup] Keycloak API is up."
+
+###############################################
 # KEYCLOAK: CREATE REALM
 ###############################################
 echo "[setup] Configuring Keycloak realm..."
 KC_TOKEN=$(get_kc_token)
 
-# Check if devops realm exists
 REALM_EXISTS=$(curl -s -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer ${KC_TOKEN}" \
   "${KEYCLOAK_URL}/admin/realms/${KC_REALM}")
@@ -119,18 +412,16 @@ if [ "$REALM_EXISTS" != "200" ]; then
       "realm": "'"${KC_REALM}"'",
       "enabled": true,
       "registrationAllowed": false,
-      "loginWithEmailAllowed": true,
-      "duplicateEmailsAllowed": false
+      "loginWithEmailAllowed": true
     }'
 fi
 
 ###############################################
-# KEYCLOAK: CREATE OIDC CLIENT FOR GLITCHTIP
+# KEYCLOAK: CREATE OIDC CLIENT
 ###############################################
 echo "[setup] Creating OIDC client for GlitchTip..."
 GLITCHTIP_CLIENT_SECRET="gt-oidc-secret-$(head -c 16 /dev/urandom | xxd -p)"
 
-# Check if client exists
 EXISTING_CLIENT=$(kc_api GET "/clients?clientId=glitchtip" 2>/dev/null || echo "[]")
 CLIENT_UUID=$(echo "$EXISTING_CLIENT" | jq -r '.[0].id // empty')
 
@@ -145,35 +436,20 @@ if [ -z "$CLIENT_UUID" ]; then
     "redirectUris": ["http://glitchtip.devops.local/*"],
     "webOrigins": ["http://glitchtip.devops.local"],
     "standardFlowEnabled": true,
-    "directAccessGrantsEnabled": true,
-    "serviceAccountsEnabled": false,
-    "authorizationServicesEnabled": false,
-    "defaultClientScopes": ["openid", "profile", "email"]
+    "directAccessGrantsEnabled": true
   }'
   CLIENT_UUID=$(kc_api GET "/clients?clientId=glitchtip" | jq -r '.[0].id')
 else
-  # Update existing client secret
-  kc_api PUT "/clients/${CLIENT_UUID}" -d '{
-    "clientId": "glitchtip",
-    "enabled": true,
-    "protocol": "openid-connect",
-    "publicClient": false,
-    "secret": "'"${GLITCHTIP_CLIENT_SECRET}"'",
-    "redirectUris": ["http://glitchtip.devops.local/*"],
-    "standardFlowEnabled": true,
-    "directAccessGrantsEnabled": true
-  }'
   GLITCHTIP_CLIENT_SECRET=$(kc_api GET "/clients/${CLIENT_UUID}/client-secret" | jq -r '.value')
 fi
 
-echo "[setup] GlitchTip client UUID: ${CLIENT_UUID}"
+echo "[setup] Client UUID: ${CLIENT_UUID}"
 
 ###############################################
 # KEYCLOAK: ADD GROUP MEMBERSHIP MAPPER
 ###############################################
-echo "[setup] Adding group membership protocol mapper..."
+echo "[setup] Adding group membership mapper..."
 
-# Check if mapper already exists
 EXISTING_MAPPER=$(kc_api GET "/clients/${CLIENT_UUID}/protocol-mappers/models" 2>/dev/null | \
   jq -r '.[] | select(.name=="group-membership") | .id // empty')
 
@@ -197,61 +473,41 @@ fi
 ###############################################
 echo "[setup] Creating group hierarchy..."
 
-# Create parent group: platform-eng
+# platform-eng parent
 PLATFORM_ENG_ID=$(kc_api GET "/groups?search=platform-eng" 2>/dev/null | \
   jq -r '.[] | select(.name=="platform-eng") | .id // empty')
-
 if [ -z "$PLATFORM_ENG_ID" ]; then
   kc_api POST "/groups" -d '{"name": "platform-eng"}'
   PLATFORM_ENG_ID=$(kc_api GET "/groups?search=platform-eng" | jq -r '.[] | select(.name=="platform-eng") | .id')
 fi
 
-# Create subgroup: glitchtip-owners under platform-eng
+# glitchtip-owners under platform-eng
 OWNERS_GROUP_ID=$(kc_api GET "/groups/${PLATFORM_ENG_ID}/children" 2>/dev/null | \
   jq -r '.[] | select(.name=="glitchtip-owners") | .id // empty')
-
 if [ -z "$OWNERS_GROUP_ID" ]; then
   kc_api POST "/groups/${PLATFORM_ENG_ID}/children" -d '{"name": "glitchtip-owners"}'
   OWNERS_GROUP_ID=$(kc_api GET "/groups/${PLATFORM_ENG_ID}/children" | \
     jq -r '.[] | select(.name=="glitchtip-owners") | .id')
 fi
 
-# Create subgroup: glitchtip-users under platform-eng
+# glitchtip-users under platform-eng
 USERS_GROUP_ID=$(kc_api GET "/groups/${PLATFORM_ENG_ID}/children" 2>/dev/null | \
   jq -r '.[] | select(.name=="glitchtip-users") | .id // empty')
-
 if [ -z "$USERS_GROUP_ID" ]; then
   kc_api POST "/groups/${PLATFORM_ENG_ID}/children" -d '{"name": "glitchtip-users"}'
   USERS_GROUP_ID=$(kc_api GET "/groups/${PLATFORM_ENG_ID}/children" | \
     jq -r '.[] | select(.name=="glitchtip-users") | .id')
 fi
 
-# Create DECOY groups
-# Top-level glitchtip-owners (decoy — different path than /platform-eng/glitchtip-owners)
-DECOY_OWNERS_ID=$(kc_api GET "/groups?search=glitchtip-owners&exact=true" 2>/dev/null | \
-  jq -r '[.[] | select(.name=="glitchtip-owners" and (.path=="/glitchtip-owners"))] | .[0].id // empty')
-
-if [ -z "$DECOY_OWNERS_ID" ]; then
-  kc_api POST "/groups" -d '{"name": "glitchtip-owners"}'
-  DECOY_OWNERS_ID=$(kc_api GET "/groups" | \
-    jq -r '.[] | select(.name=="glitchtip-owners" and (.path=="/glitchtip-owners")) | .id // empty')
-fi
-
-# /engineering/glitchtip-admins (decoy)
+# Decoy groups
+kc_api POST "/groups" -d '{"name": "glitchtip-owners"}' 2>/dev/null || true
 ENG_GROUP_ID=$(kc_api GET "/groups?search=engineering" 2>/dev/null | \
   jq -r '.[] | select(.name=="engineering") | .id // empty')
-
 if [ -z "$ENG_GROUP_ID" ]; then
   kc_api POST "/groups" -d '{"name": "engineering"}'
   ENG_GROUP_ID=$(kc_api GET "/groups?search=engineering" | jq -r '.[] | select(.name=="engineering") | .id')
 fi
-
-DECOY_ADMINS_ID=$(kc_api GET "/groups/${ENG_GROUP_ID}/children" 2>/dev/null | \
-  jq -r '.[] | select(.name=="glitchtip-admins") | .id // empty')
-
-if [ -z "$DECOY_ADMINS_ID" ]; then
-  kc_api POST "/groups/${ENG_GROUP_ID}/children" -d '{"name": "glitchtip-admins"}'
-fi
+kc_api POST "/groups/${ENG_GROUP_ID}/children" -d '{"name": "glitchtip-admins"}' 2>/dev/null || true
 
 echo "[setup] Group IDs: owners=${OWNERS_GROUP_ID}, users=${USERS_GROUP_ID}"
 
@@ -260,12 +516,10 @@ echo "[setup] Group IDs: owners=${OWNERS_GROUP_ID}, users=${USERS_GROUP_ID}"
 ###############################################
 echo "[setup] Creating Keycloak users..."
 USER_PASS="DevOps2024!"
-
 declare -A USER_IDS
 
 for username in alice bob charlie diana eve; do
   EXISTING_USER=$(kc_api GET "/users?username=${username}&exact=true" 2>/dev/null | jq -r '.[0].id // empty')
-
   if [ -z "$EXISTING_USER" ]; then
     kc_api POST "/users" -d '{
       "username": "'"${username}"'",
@@ -274,46 +528,26 @@ for username in alice bob charlie diana eve; do
       "emailVerified": true,
       "firstName": "'"$(echo "${username}" | sed 's/./\U&/')"'",
       "lastName": "Engineer",
-      "credentials": [{
-        "type": "password",
-        "value": "'"${USER_PASS}"'",
-        "temporary": false
-      }]
+      "credentials": [{"type": "password", "value": "'"${USER_PASS}"'", "temporary": false}]
     }'
     EXISTING_USER=$(kc_api GET "/users?username=${username}&exact=true" | jq -r '.[0].id')
   fi
-
   USER_IDS[${username}]="${EXISTING_USER}"
-  echo "[setup] User ${username}: ${EXISTING_USER}"
 done
 
-###############################################
-# KEYCLOAK: ASSIGN CORRECT GROUP MEMBERSHIPS
-# (before breakage — alice and bob in owners,
-#  charlie/diana/eve in users group)
-###############################################
-echo "[setup] Setting correct group memberships (pre-breakage baseline)..."
-
-# Owners: alice, bob
+# Correct group memberships: alice+bob=owners, all=users
 for username in alice bob; do
   kc_api_raw PUT "/users/${USER_IDS[${username}]}/groups/${OWNERS_GROUP_ID}" -d '{}'
   kc_api_raw PUT "/users/${USER_IDS[${username}]}/groups/${USERS_GROUP_ID}" -d '{}'
 done
-
-# Members only: charlie, diana, eve
 for username in charlie diana eve; do
   kc_api_raw PUT "/users/${USER_IDS[${username}]}/groups/${USERS_GROUP_ID}" -d '{}'
 done
 
 ###############################################
-# GLITCHTIP: CONFIGURE OIDC INTEGRATION
+# GLITCHTIP: CONFIGURE OIDC + CREATE USERS
 ###############################################
-echo "[setup] Configuring GlitchTip OIDC integration..."
-
-# Discover the GlitchTip web deployment name
-GT_DEPLOY=$(kubectl get deployments -n glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "glitchtip-web")
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-         kubectl get pods -n glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+echo "[setup] Configuring GlitchTip OIDC..."
 
 # Create the OIDC ConfigMap (correct state first)
 kubectl apply -f - <<EOF
@@ -327,7 +561,7 @@ metadata:
     component: oidc-integration
 data:
   ENABLE_OPEN_ID_CONNECT: "true"
-  OPENID_CONNECT_URL: "http://keycloak.devops.local/realms/${KC_REALM}/.well-known/openid-configuration"
+  OPENID_CONNECT_URL: "${KEYCLOAK_URL}/realms/${KC_REALM}/.well-known/openid-configuration"
   OPENID_CONNECT_CLIENT_ID: "glitchtip"
   OPENID_CONNECT_CLIENT_SECRET: "${GLITCHTIP_CLIENT_SECRET}"
   OPENID_CONNECT_SCOPE: "openid profile email groups"
@@ -335,67 +569,52 @@ data:
   GLITCHTIP_OIDC_MEMBER_GROUP: "/platform-eng/glitchtip-users"
 EOF
 
-# Patch GlitchTip deployment to use OIDC config
-kubectl patch deployment "${GT_DEPLOY}" -n glitchtip --type json -p '[{
-  "op": "add",
-  "path": "/spec/template/spec/containers/0/envFrom/-",
-  "value": {"configMapRef": {"name": "glitchtip-oidc-config"}}
-}]' 2>/dev/null || \
-kubectl patch deployment "${GT_DEPLOY}" -n glitchtip --type strategic -p '{
+# Patch GlitchTip web deployment to include OIDC config
+kubectl patch deployment glitchtip-web -n glitchtip --type strategic -p '{
   "spec": {
     "template": {
       "spec": {
         "containers": [{
-          "name": "'"$(kubectl get deployment "${GT_DEPLOY}" -n glitchtip -o jsonpath='{.spec.template.spec.containers[0].name}')"'",
-          "envFrom": [{"configMapRef": {"name": "glitchtip-oidc-config"}}]
+          "name": "glitchtip",
+          "envFrom": [
+            {"configMapRef": {"name": "glitchtip-config"}},
+            {"secretRef": {"name": "glitchtip-secrets"}},
+            {"configMapRef": {"name": "glitchtip-oidc-config"}}
+          ]
         }]
       }
     }
   }
 }'
 
-kubectl rollout restart deployment "${GT_DEPLOY}" -n glitchtip
-kubectl rollout status deployment "${GT_DEPLOY}" -n glitchtip --timeout=180s
+kubectl rollout restart deployment glitchtip-web -n glitchtip
+kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s || true
 
 # Wait for GlitchTip to come back
 for i in $(seq 1 60); do
   if curl -sf -o /dev/null "${GLITCHTIP_URL}" 2>/dev/null; then break; fi
-  sleep 3
+  sleep 5
 done
 
-###############################################
-# GLITCHTIP: CREATE ORG + USERS VIA API/DJANGO
-###############################################
+# Create GlitchTip org + users via Django
+GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+
 echo "[setup] Creating GlitchTip organization and users..."
-
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-         kubectl get pods -n glitchtip -o jsonpath='{.items[0].metadata.name}')
-
-# Create superuser and organization via Django management commands
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
 from django.contrib.auth import get_user_model
-from organizations_ext.models import Organization, OrganizationUser
-
 User = get_user_model()
 
-# Create or get admin superuser
-admin, _ = User.objects.get_or_create(
-    email='admin@devops.local',
-    defaults={'is_staff': True, 'is_superuser': True}
-)
-admin.set_password('GlitchAdmin2024!')
-admin.save()
+# Ensure admin exists
+admin = User.objects.filter(email='admin@devops.local').first()
+if not admin:
+    admin = User.objects.create_superuser(email='admin@devops.local', password='GlitchAdmin2024!')
 
-# Create organization
+# Create org
+from organizations_ext.models import Organization, OrganizationUser
 org, _ = Organization.objects.get_or_create(name='DevOps Platform')
+OrganizationUser.objects.get_or_create(organization=org, user=admin, defaults={'role': 0})
 
-# Ensure admin is owner
-OrganizationUser.objects.get_or_create(
-    organization=org, user=admin,
-    defaults={'role': 0}  # 0 = owner in GlitchTip
-)
-
-# Create member users and set them all as OWNERS (the breakage)
+# Create users — ALL as owners (breakage)
 for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
     user, created = User.objects.get_or_create(
         email=f'{username}@devops.local',
@@ -405,20 +624,16 @@ for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
         user.set_password('DevOps2024!')
         user.save()
     ou, _ = OrganizationUser.objects.get_or_create(
-        organization=org, user=user,
-        defaults={'role': 0}  # 0 = owner — THIS IS THE BREAKAGE
+        organization=org, user=user, defaults={'role': 0}
     )
-    if not created:
-        ou.role = 0  # Force owner
-        ou.save()
+    ou.role = 0  # owner — THIS IS THE BREAKAGE
+    ou.save()
 
-print('GlitchTip users configured with owner roles.')
-" 2>/dev/null || echo "[setup] Warning: Django shell command may have partial failure"
+print('GlitchTip users configured.')
+" 2>/dev/null || echo "[setup] Warning: Django shell may have partial failure"
 
 ###############################################
 # BREAKAGE 1: KEYCLOAK GROUP MEMBERSHIPS
-# Add charlie, diana, eve to owners group
-# (they should only be in users group)
 ###############################################
 echo "[setup] BREAKAGE 1: Adding all users to glitchtip-owners group..."
 for username in charlie diana eve; do
@@ -427,8 +642,6 @@ done
 
 ###############################################
 # BREAKAGE 2: GLITCHTIP OIDC CONFIGMAP
-# Remove 'groups' from scope, use flat owner
-# group name instead of full path
 ###############################################
 echo "[setup] BREAKAGE 2: Corrupting GlitchTip OIDC config..."
 kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
@@ -437,26 +650,21 @@ kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
     "GLITCHTIP_OIDC_OWNER_GROUP": "glitchtip-owners"
   }
 }'
-
-# Restart to pick up broken config
-kubectl rollout restart deployment "${GT_DEPLOY}" -n glitchtip
-kubectl rollout status deployment "${GT_DEPLOY}" -n glitchtip --timeout=180s || true
+kubectl rollout restart deployment glitchtip-web -n glitchtip
+kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s || true
 
 ###############################################
 # BREAKAGE 3: ENFORCER CRONJOB
-# Reconciler that re-adds users to owners
-# group every 3 minutes
 ###############################################
 echo "[setup] BREAKAGE 3: Creating enforcer CronJob..."
 
-# Store Keycloak creds in a secret for the CronJob
 kubectl create secret generic keycloak-reconciler-creds -n keycloak \
   --from-literal=KC_ADMIN_USER="${KC_ADMIN_USER}" \
   --from-literal=KC_ADMIN_PASS="${KC_ADMIN_PASS}" \
   --from-literal=KC_REALM="${KC_REALM}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f - <<EOF
+kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -484,46 +692,34 @@ spec:
           restartPolicy: Never
           containers:
           - name: reconciler
-            image: curlimages/curl:latest
+            image: docker.io/curlimages/curl:8.7.1
+            imagePullPolicy: IfNotPresent
             command:
             - /bin/sh
             - -c
             - |
               KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
-              TOKEN=\$(curl -sf -X POST "\${KC_URL}/realms/master/protocol/openid-connect/token" \
+              TOKEN=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
                 -d "client_id=admin-cli" \
                 -d "grant_type=password" \
-                -d "username=\${KC_ADMIN_USER}" \
-                -d "password=\${KC_ADMIN_PASS}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-
-              if [ -z "\${TOKEN}" ]; then echo "Failed to get token"; exit 1; fi
-
-              # Get owners group ID
-              OWNERS_GID=\$(curl -sf -H "Authorization: Bearer \${TOKEN}" \
-                "\${KC_URL}/admin/realms/\${KC_REALM}/groups?search=glitchtip-owners" | \
-                sed -n 's/.*"id":"\([^"]*\)".*"path":"\/platform-eng\/glitchtip-owners".*/\1/p')
-
-              if [ -z "\${OWNERS_GID}" ]; then
-                # Try nested search
-                PLATFORM_GID=\$(curl -sf -H "Authorization: Bearer \${TOKEN}" \
-                  "\${KC_URL}/admin/realms/\${KC_REALM}/groups?search=platform-eng" | \
-                  sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
-                OWNERS_GID=\$(curl -sf -H "Authorization: Bearer \${TOKEN}" \
-                  "\${KC_URL}/admin/realms/\${KC_REALM}/groups/\${PLATFORM_GID}/children" | \
-                  sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
-              fi
-
-              # Add ALL users to owners group
+                -d "username=${KC_ADMIN_USER}" \
+                -d "password=${KC_ADMIN_PASS}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+              [ -z "${TOKEN}" ] && exit 1
+              PLATFORM_GID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
+              OWNERS_GID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups/${PLATFORM_GID}/children" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
               for USERNAME in alice bob charlie diana eve; do
-                USER_ID=\$(curl -sf -H "Authorization: Bearer \${TOKEN}" \
-                  "\${KC_URL}/admin/realms/\${KC_REALM}/users?username=\${USERNAME}&exact=true" | \
+                USER_ID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users?username=${USERNAME}&exact=true" | \
                   sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-                if [ -n "\${USER_ID}" ] && [ -n "\${OWNERS_GID}" ]; then
-                  curl -sf -X PUT -H "Authorization: Bearer \${TOKEN}" -H "Content-Type: application/json" \
-                    "\${KC_URL}/admin/realms/\${KC_REALM}/users/\${USER_ID}/groups/\${OWNERS_GID}" -d '{}'
-                fi
+                [ -n "${USER_ID}" ] && [ -n "${OWNERS_GID}" ] && \
+                curl -sf -X PUT -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users/${USER_ID}/groups/${OWNERS_GID}" -d '{}'
               done
-              echo "Realm group reconciliation complete."
+              echo "Realm reconciliation complete."
             env:
             - name: KC_ADMIN_USER
               valueFrom:
@@ -544,14 +740,10 @@ EOF
 
 ###############################################
 # BREAKAGE 4: NETWORK POLICY
-# Block GlitchTip → Keycloak egress via
-# label mismatch on namespace selector
 ###############################################
 echo "[setup] BREAKAGE 4: Creating restrictive NetworkPolicy..."
 
-# First, create a default-deny egress in glitchtip namespace
-# so the allow policy actually matters
-kubectl apply -f - <<EOF
+kubectl apply -f - <<'EOF'
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -561,13 +753,7 @@ spec:
   podSelector: {}
   policyTypes:
   - Egress
-EOF
-
-# Now create the "allow" policy with a subtle label mismatch
-# It allows egress to DNS, internal glitchtip services, and
-# "keycloak" namespace — but requires label sso-tier: identity
-# which the keycloak namespace does NOT have
-kubectl apply -f - <<EOF
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -581,24 +767,20 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: glitchtip
+      app: glitchtip
   policyTypes:
   - Egress
   egress:
-  # Allow DNS resolution
   - to: []
     ports:
     - protocol: UDP
       port: 53
     - protocol: TCP
       port: 53
-  # Allow internal glitchtip namespace traffic
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: glitchtip
-  # Allow traffic to keycloak namespace — BUT requires sso-tier label
-  # which the keycloak namespace does NOT have (this is the breakage)
   - to:
     - namespaceSelector:
         matchLabels:
@@ -611,7 +793,6 @@ EOF
 ###############################################
 echo "[setup] Creating decoy ConfigMaps..."
 
-# Decoy 1: Troubleshooting guide with wrong advice
 kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
@@ -621,41 +802,21 @@ metadata:
   labels:
     app: glitchtip
     component: documentation
-  annotations:
-    description: "OIDC troubleshooting notes from platform team"
 data:
   TROUBLESHOOTING.md: |
     # GlitchTip OIDC Troubleshooting
-
-    ## Common Issues
-
-    ### Users not getting correct roles
-    If users are receiving incorrect roles after SSO login, check the following:
-
-    1. Verify the OIDC claim key. For Keycloak integration, the role information
-       is typically in the 'realm_access.roles' claim, NOT in a 'groups' claim.
-       Update OPENID_CONNECT_ROLE_CLAIM to 'realm_access.roles' if needed.
-
-    2. Ensure the Keycloak client has the 'roles' scope enabled in the client
-       settings. The default scopes should include 'openid', 'profile', 'email',
-       and 'roles'.
-
-    3. Check that the group-to-role mapper in Keycloak uses the flat group name
-       format (e.g., 'glitchtip-owners') rather than the full path format.
-       Full paths were deprecated in Keycloak 22.
-
-    ### SSO login failures
-    If OIDC login is failing entirely:
-    - Check that the OIDC discovery endpoint is reachable
-    - Verify client ID and secret match between Keycloak and GlitchTip
-    - Ensure redirect URIs are configured correctly
-
-    ## Contact
-    Platform Engineering: #platform-eng on Mattermost
-EOF
-
-# Decoy 2: "Backup" config with wrong values (immutable)
-kubectl apply -f - <<EOF
+    ## Users not getting correct roles
+    If users are receiving incorrect roles after SSO login, check:
+    1. The OIDC claim key — for Keycloak, role info is typically in
+       'realm_access.roles', NOT in a 'groups' claim.
+    2. Ensure the Keycloak client has the 'roles' scope enabled.
+    3. The group-to-role mapper should use flat group name format
+       (e.g., 'glitchtip-owners') not full path format.
+    ## SSO login failures
+    - Check OIDC discovery endpoint is reachable
+    - Verify client ID and secret match
+    - Ensure redirect URIs are correct
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -666,21 +827,16 @@ metadata:
     component: oidc-integration
     backup: "true"
   annotations:
-    description: "Backup of OIDC config taken before Keycloak 22 migration"
     backup-date: "2024-11-15"
 immutable: true
 data:
   ENABLE_OPEN_ID_CONNECT: "true"
-  OPENID_CONNECT_URL: "http://keycloak.devops.local/realms/${KC_REALM}/.well-known/openid-configuration"
+  OPENID_CONNECT_URL: "${KEYCLOAK_URL}/realms/${KC_REALM}/.well-known/openid-configuration"
   OPENID_CONNECT_CLIENT_ID: "glitchtip"
   OPENID_CONNECT_CLIENT_SECRET: "old-secret-rotated"
   OPENID_CONNECT_SCOPE: "openid profile email roles"
   GLITCHTIP_OIDC_OWNER_GROUP: "glitchtip-admins"
-  GLITCHTIP_OIDC_MEMBER_GROUP: "glitchtip-users"
-EOF
-
-# Decoy 3: Keycloak migration notes
-kubectl apply -f - <<EOF
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -689,41 +845,27 @@ metadata:
   labels:
     app: keycloak
     component: documentation
-  annotations:
-    description: "Notes from Keycloak 21 to 22 migration"
 data:
   MIGRATION_NOTES.md: |
-    # Keycloak Migration Notes (v21 → v22)
-
+    # Keycloak Migration Notes (v21 to v22)
     ## Group Claim Changes
     - Group membership claims now use FLAT names by default
     - The 'full.path' option in group mappers has been deprecated
-    - Applications consuming group claims should expect flat names
-      (e.g., 'glitchtip-owners' instead of '/platform-eng/glitchtip-owners')
-    - If your application still requires full paths, set
-      'full.path.fallback: true' in the mapper config
-
+    - Applications should expect flat names (e.g., 'glitchtip-owners'
+      instead of '/platform-eng/glitchtip-owners')
     ## Client Scope Changes
-    - The 'groups' scope has been renamed to 'group-membership'
-    - Legacy 'groups' scope is still accepted but may be removed in v23
-    - Recommended to update all clients to use 'group-membership' scope
-
-    ## Action Items
-    - [x] Update all OIDC clients to use flat group names
-    - [x] Migrate 'groups' scope to 'group-membership'
-    - [ ] Verify all applications accept new claim format
+    - The 'groups' scope renamed to 'group-membership'
+    - Legacy 'groups' scope still accepted but may be removed in v23
 EOF
 
 ###############################################
-# STRIP ANNOTATIONS FOR DIFFICULTY
+# STRIP ANNOTATIONS
 ###############################################
-echo "[setup] Stripping last-applied-configuration annotations..."
-for resource in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-troubleshooting configmap/keycloak-migration-notes; do
-  ns="glitchtip"
-  if [[ "$resource" == *"keycloak"* ]]; then ns="keycloak"; fi
-  kubectl annotate "$resource" -n "$ns" kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+echo "[setup] Stripping annotations..."
+for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-troubleshooting; do
+  kubectl annotate "$res" -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 done
-
+kubectl annotate configmap/keycloak-migration-notes -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-egress-policy -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
@@ -731,7 +873,7 @@ kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.ku
 ###############################################
 # SAVE SETUP INFO FOR GRADER
 ###############################################
-echo "[setup] Saving setup info for grader..."
+echo "[setup] Saving setup info..."
 cat > /root/.setup_info <<SETUP_EOF
 KC_REALM=${KC_REALM}
 KC_ADMIN_USER=${KC_ADMIN_USER}
@@ -742,10 +884,8 @@ GLITCHTIP_CLIENT_SECRET=${GLITCHTIP_CLIENT_SECRET}
 CLIENT_UUID=${CLIENT_UUID}
 OWNERS_GROUP_ID=${OWNERS_GROUP_ID}
 USERS_GROUP_ID=${USERS_GROUP_ID}
-GT_DEPLOY=${GT_DEPLOY}
 OWNER_USERS=alice,bob
 MEMBER_USERS=charlie,diana,eve
-ALL_USERS=alice,bob,charlie,diana,eve
 USER_PASS=${USER_PASS}
 ALICE_ID=${USER_IDS[alice]}
 BOB_ID=${USER_IDS[bob]}
@@ -753,15 +893,8 @@ CHARLIE_ID=${USER_IDS[charlie]}
 DIANA_ID=${USER_IDS[diana]}
 EVE_ID=${USER_IDS[eve]}
 SETUP_EOF
-
 chmod 600 /root/.setup_info
 
 echo "[setup] ============================================"
-echo "[setup] Setup complete. Breakages applied:"
-echo "[setup]   1. All users added to glitchtip-owners group in Keycloak"
-echo "[setup]   2. GlitchTip OIDC scope missing 'groups', owner group path is flat"
-echo "[setup]   3. Enforcer CronJob re-adds users to owners group every 3min"
-echo "[setup]   4. NetworkPolicy blocks GlitchTip → Keycloak egress"
-echo "[setup]   5. All GlitchTip users have owner role"
-echo "[setup]   6. Decoy ConfigMaps created for misdirection"
+echo "[setup] Setup complete. All breakages applied."
 echo "[setup] ============================================"
