@@ -91,6 +91,9 @@ echo "[setup] Waiting for k3s API to stabilize..."
 until kubectl get nodes >/dev/null 2>&1; do sleep 3; done
 sleep 10
 
+# Disable ingress-nginx admission webhook (can be broken after scale-down)
+kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
+
 ###############################################
 # DEPLOY GLITCHTIP STACK
 ###############################################
