@@ -888,9 +888,9 @@ spec:
 EOF
 
 ###############################################
-# DECOY CONFIGMAPS (misleading, not helpful)
+# DECOY CONFIGMAPS + DISTRACTION CONTENT
 ###############################################
-echo "[setup] Creating decoy ConfigMaps..."
+echo "[setup] Creating decoy ConfigMaps and documentation..."
 
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -937,6 +937,131 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: glitchtip-incident-chat-log
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: documentation
+    type: chat-export
+  annotations:
+    exported-from: "mattermost"
+    channel: "platform-eng"
+    date: "2025-03-15"
+data:
+  chat-export.md: |
+    # Mattermost Export — #platform-eng channel
+    ## March 15, 2025
+
+    **@diana** [09:12 AM]
+    hey has anyone else noticed they can see all the GlitchTip projects now?
+    i can see backend-api and infra-monitoring which definitely aren't mine
+
+    **@charlie** [09:14 AM]
+    yeah same here, i thought it was just a UI bug. i can even delete stuff
+    which is weird
+
+    **@bob** [09:18 AM]
+    that's not right. let me check the keycloak config
+    we migrated to the new realm setup last month, might be related
+
+    **@alice** [09:22 AM]
+    @bob i looked at this yesterday actually. i think the issue is in how
+    the oidc client maps groups. the old config used realm_access.roles
+    but we switched to group-based mapping during the migration
+
+    **@bob** [09:25 AM]
+    right. i remember we had to set up the group mapper on the keycloak
+    client. did someone change the scope config on the glitchtip side?
+
+    **@alice** [09:28 AM]
+    not sure. the config-backup configmap should have the last known
+    good config if we need to roll back. i think @priya made that
+    before she left
+
+    **@diana** [09:31 AM]
+    should i just restore from the backup configmap?
+
+    **@bob** [09:33 AM]
+    no don't do that yet, the backup might be from before the keycloak
+    22 migration so the client secret would be wrong at minimum.
+    let me look at it after standup
+
+    **@charlie** [09:45 AM]
+    fyi i also can't log in via SSO anymore. it just hangs when trying
+    to redirect to keycloak. might be a network thing?
+
+    **@bob** [10:02 AM]
+    ok so i tried fixing the group memberships in keycloak manually but
+    they keep reverting back after a few minutes. something is
+    re-adding everyone to the owners group. i don't have time to dig
+    into it rn, will look after sprint planning
+
+    **@alice** [10:15 AM]
+    that's weird. there shouldn't be anything automatically modifying
+    keycloak groups. maybe one of the DR jobs? idk
+
+    **@diana** [10:18 AM]
+    isn't there a realm backup thing that runs every few minutes?
+    maybe that's restoring old state?
+
+    **@bob** [10:22 AM]
+    could be. anyway gtg to standup, someone should ticket this
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-postmortem-2024-q3
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: documentation
+    type: postmortem
+  annotations:
+    incident-date: "2024-09-18"
+    status: "resolved"
+data:
+  postmortem.md: |
+    # Post-Mortem: GlitchTip Authentication Outage
+    ## September 18, 2024
+
+    ### Summary
+    GlitchTip SSO login was broken for ~4 hours after the Keycloak 21→22 upgrade.
+    Root cause was the client secret rotation during upgrade that wasn't propagated
+    to GlitchTip's OIDC configuration.
+
+    ### Root Cause
+    During the Keycloak upgrade, the glitchtip OIDC client secret was automatically
+    rotated. The GlitchTip deployment still had the old secret in its environment
+    variables via the glitchtip-oidc-config ConfigMap.
+
+    ### Resolution
+    1. Retrieved new client secret from Keycloak admin console
+    2. Updated glitchtip-oidc-config ConfigMap with new secret
+    3. Restarted GlitchTip web deployment to pick up new config
+    4. Verified SSO login worked
+
+    ### Lessons Learned
+    - Always check client secret after Keycloak upgrades
+    - The config-backup ConfigMap was outdated and useless
+    - Consider automating secret rotation propagation
+
+    ### Action Items
+    - [x] Document Keycloak upgrade procedure
+    - [x] Add monitoring for OIDC auth failures
+    - [ ] Set up automated secret sync between Keycloak and app configs
+    - [ ] Review group mapper settings (they were changed during migration
+          but we haven't verified all downstream effects)
+
+    ### Technical Notes
+    - The Keycloak client uses group membership mapper for role assignment
+    - During the v22 migration, we switched from realm roles to group-based
+      OIDC claims. The old realm_access.roles approach was deprecated.
+    - Group mapper configuration was set to use flat names for compatibility
+      but this hasn't been fully tested with the new group hierarchy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: keycloak-client-notes
   namespace: keycloak
   labels:
@@ -961,16 +1086,74 @@ data:
       the security hardening in Q4 2024 to reduce token size
     - Applications that need group claims should use the built-in
       group mapper on the client directly (no extra scope needed)
+
+    ## Disaster Recovery
+    - Realm state is backed up via automated sync jobs in this namespace
+    - DO NOT delete the backup/sync CronJobs — they are required for
+      compliance with the DR policy
+    - Last DR audit: 2025-02-01 (passed)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-group-architecture
+  namespace: keycloak
+  labels:
+    app: keycloak
+    component: documentation
+    type: wiki-export
+  annotations:
+    exported-from: "confluence"
+    last-updated: "2024-08-12"
+data:
+  group-design.md: |
+    # Keycloak Group Architecture (OUTDATED — pre-migration)
+
+    > **WARNING**: This document was exported from Confluence and may not
+    > reflect the current state after the Keycloak 22 migration.
+
+    ## Group Hierarchy (as of August 2024)
+
+    Our Keycloak realm uses flat top-level groups for application role mapping:
+
+    - glitchtip-owners → maps to GlitchTip owner role
+    - glitchtip-users → maps to GlitchTip member role
+    - grafana-admins → maps to Grafana admin role
+    - grafana-viewers → maps to Grafana viewer role
+
+    ## Role Mapping Convention
+    Applications should match group names WITHOUT path prefixes.
+    Example: check for "glitchtip-owners" not "/some/path/glitchtip-owners"
+
+    ## Migration Notes
+    - Q4 2024: Planning to restructure groups under team-based parent
+      groups (e.g., /platform-eng/glitchtip-owners) for better organization
+    - This will require updating all downstream OIDC configurations to
+      use full path matching instead of flat names
+    - Status: NOT YET IMPLEMENTED (as of this document)
+
+    ## Current Members
+    | Group | Members |
+    |-------|---------|
+    | glitchtip-owners | alice, bob, priya (admin) |
+    | glitchtip-users | charlie, diana, eve, frank, grace |
+    | grafana-admins | alice, bob |
+    | grafana-viewers | (all engineers) |
+
+    *Note: priya left the company in Jan 2025 — her accounts should
+    have been deprovisioned but verify this.*
 EOF
 
 ###############################################
 # STRIP ANNOTATIONS
 ###############################################
 echo "[setup] Stripping annotations..."
-for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-config-backup configmap/glitchtip-oidc-config-v2; do
+for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-config-backup configmap/glitchtip-oidc-config-v2 configmap/glitchtip-incident-chat-log configmap/glitchtip-postmortem-2024-q3; do
   kubectl annotate "$res" -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 done
-kubectl annotate configmap/keycloak-client-notes -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+for res in configmap/keycloak-client-notes configmap/keycloak-group-architecture; do
+  kubectl annotate "$res" -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+done
 kubectl annotate networkpolicy/glitchtip-egress-policy -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
