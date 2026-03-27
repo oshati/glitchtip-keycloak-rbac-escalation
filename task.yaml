@@ -1,4 +1,4 @@
-id: null
+id: b0ba07bd-d9ac-46df-9f5f-5d2156176774
 prompt: |
   ## GlitchTip SSO Access Control Incident
 
@@ -7,17 +7,24 @@ prompt: |
   including the ability to delete projects, revoke DSN tokens, and modify alert rules across all organizations.
 
   GlitchTip is integrated with our Keycloak SSO instance for authentication and role assignment.
-  Something in the OIDC integration pipeline is granting elevated access to users who shouldn't have it.
+  The OIDC integration maps Keycloak group memberships to GlitchTip organization roles using a groups
+  scope and full group path matching (e.g., /parent-group/child-group format).
 
   Additionally, attempts to test SSO login are currently failing — GlitchTip cannot seem to communicate
-  with the Keycloak identity provider at all.
+  with the Keycloak identity provider at all, possibly due to network restrictions.
 
-  Investigate the full OIDC integration between GlitchTip (glitchtip.devops.local) and Keycloak
-  (keycloak.devops.local). Identify what is causing the privilege escalation, restore correct
+  The ops team also noticed that manual fixes to Keycloak group memberships keep reverting within
+  minutes. There may be an automated process in the keycloak namespace that is re-applying incorrect
+  configuration. This needs to be identified and stopped.
+
+  Investigate the full OIDC integration between GlitchTip (glitchtip.devops.local:8080) and Keycloak
+  (keycloak.devops.local:8080). Identify what is causing the privilege escalation, restore correct
   role assignments, and ensure the SSO login flow works end-to-end with proper role mapping.
 
   The platform engineering team (alice, bob) should retain owner access. All other engineers
-  (charlie, diana, eve) should have member-level access only.
+  (charlie, diana, eve) should have member-level access only — both in Keycloak group memberships
+  and in GlitchTip's organization member roles (demote them via the GlitchTip Django management
+  shell or API).
 
 metadata:
   category: platform-eng

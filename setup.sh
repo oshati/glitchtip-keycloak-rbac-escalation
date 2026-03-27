@@ -849,15 +849,19 @@ data:
     # GlitchTip OIDC Troubleshooting
     ## Users not getting correct roles
     If users are receiving incorrect roles after SSO login, check:
-    1. The OIDC claim key — for Keycloak, role info is typically in
-       'realm_access.roles', NOT in a 'groups' claim.
-    2. Ensure the Keycloak client has the 'roles' scope enabled.
-    3. The group-to-role mapper should use flat group name format
-       (e.g., 'glitchtip-owners') not full path format.
-    ## SSO login failures
-    - Check OIDC discovery endpoint is reachable
-    - Verify client ID and secret match
-    - Ensure redirect URIs are correct
+    1. Verify the Keycloak client has a group membership mapper configured
+       with the correct claim name and full path settings.
+    2. Check that the OIDC scope requested by GlitchTip includes the
+       scope needed to retrieve group membership claims.
+    3. Verify the owner group value in GlitchTip config matches the
+       exact format returned by the Keycloak group mapper.
+    4. Check for automated jobs that may be reverting configuration.
+    ## Common pitfalls
+    - The glitchtip-oidc-config-backup ConfigMap contains stale values
+      from before the Keycloak migration — do not restore from it.
+    - Multiple groups with similar names may exist at different paths
+      in the Keycloak group hierarchy — verify you're targeting the
+      correct nested group, not a top-level group with the same name.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -876,8 +880,8 @@ data:
   OPENID_CONNECT_URL: "${KEYCLOAK_URL}/realms/${KC_REALM}/.well-known/openid-configuration"
   OPENID_CONNECT_CLIENT_ID: "glitchtip"
   OPENID_CONNECT_CLIENT_SECRET: "old-secret-rotated"
-  OPENID_CONNECT_SCOPE: "openid profile email roles"
-  GLITCHTIP_OIDC_OWNER_GROUP: "glitchtip-admins"
+  OPENID_CONNECT_SCOPE: "openid profile email groups"
+  GLITCHTIP_OIDC_OWNER_GROUP: "/engineering/glitchtip-admins"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -891,13 +895,15 @@ data:
   MIGRATION_NOTES.md: |
     # Keycloak Migration Notes (v21 to v22)
     ## Group Claim Changes
-    - Group membership claims now use FLAT names by default
-    - The 'full.path' option in group mappers has been deprecated
-    - Applications should expect flat names (e.g., 'glitchtip-owners'
-      instead of '/platform-eng/glitchtip-owners')
+    - Group membership mapper now supports both full path and flat name formats
+    - The 'full.path' option in group mappers controls the format:
+      true = full paths (e.g., /platform-eng/glitchtip-owners)
+      false = flat names (e.g., glitchtip-owners)
+    - Applications must match whatever format the mapper produces
+    - Multiple groups with the same leaf name (e.g., /platform-eng/glitchtip-owners
+      vs /glitchtip-owners) can cause ambiguous matching if full paths are not used
     ## Client Scope Changes
-    - The 'groups' scope renamed to 'group-membership'
-    - Legacy 'groups' scope still accepted but may be removed in v23
+    - No changes to existing scope names in this version
 EOF
 
 ###############################################
