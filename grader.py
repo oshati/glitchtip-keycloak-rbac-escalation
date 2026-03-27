@@ -104,7 +104,7 @@ def check_enforcer_neutralized(setup_info):
     """
     # Check if CronJob exists
     rc, stdout, _ = run_cmd(
-        "kubectl get cronjob keycloak-realm-backup-sync -n keycloak "
+        "kubectl get cronjob keycloak-cert-renewal-check -n keycloak "
         "-o json 2>/dev/null"
     )
 
