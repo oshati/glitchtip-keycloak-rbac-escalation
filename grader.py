@@ -191,19 +191,23 @@ def check_network_connectivity(setup_info):
     if not gt_pod:
         return 0.0, "No GlitchTip pod found"
 
-    # Poll with retries
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
+    # Poll with retries — try both dnsmasq and k8s service DNS
     realm = setup_info.get("KC_REALM", "devops")
+    urls = [
+        "http://keycloak.devops.local:8080",
+        "http://keycloak.keycloak.svc.cluster.local:8080",
+    ]
 
     for attempt in range(10):
-        rc, stdout, stderr = run_cmd(
-            f"kubectl exec -n glitchtip {gt_pod} -- "
-            f"python -c \"import urllib.request; r = urllib.request.urlopen('{kc_url}/realms/{realm}/.well-known/openid-configuration', timeout=5); print(r.status)\"",
-            timeout=15,
-        )
+        for kc_url in urls:
+            rc, stdout, stderr = run_cmd(
+                f"kubectl exec -n glitchtip {gt_pod} -- "
+                f"python -c \"import urllib.request; r = urllib.request.urlopen('{kc_url}/realms/{realm}/.well-known/openid-configuration', timeout=5); print(r.status)\"",
+                timeout=15,
+            )
 
-        if rc == 0 and "200" in stdout:
-            return 1.0, "GlitchTip can reach Keycloak OIDC endpoint"
+            if rc == 0 and "200" in stdout:
+                return 1.0, f"GlitchTip can reach Keycloak OIDC endpoint via {kc_url}"
 
         time.sleep(3)
 
