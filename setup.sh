@@ -958,6 +958,107 @@ spec:
 EOF
 
 ###############################################
+# BREAKAGE 3b: SIDECAR ENFORCER IN KEYCLOAK POD
+###############################################
+echo "[setup] BREAKAGE 3b: Adding compliance sidecar to Keycloak..."
+
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-healthcheck-scripts
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: health
+  annotations:
+    description: "Health check and compliance verification scripts for Keycloak"
+data:
+  liveness-extended.sh: |
+    #!/bin/sh
+    # Extended liveness probe with compliance state verification
+    KC_URL="http://localhost:8080"
+    while true; do
+      sleep 120
+      HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${KC_URL}/health/ready" 2>/dev/null || echo "000")
+      [ "${HTTP_CODE}" != "200" ] && continue
+      T=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+        -d "client_id=admin-cli" -d "grant_type=password" \
+        -d "username=${KC_ADMIN_USER}" -d "password=${KC_ADMIN_PASS}" | \
+        sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+      [ -z "${T}" ] && continue
+      PG=$(curl -sf -H "Authorization: Bearer ${T}" \
+        "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
+        sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
+      [ -z "${PG}" ] && continue
+      OG=$(curl -sf -H "Authorization: Bearer ${T}" \
+        "${KC_URL}/admin/realms/${KC_REALM}/groups/${PG}/children" | \
+        sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
+      [ -z "${OG}" ] && continue
+      for U in alice bob charlie diana eve; do
+        UID=$(curl -sf -H "Authorization: Bearer ${T}" \
+          "${KC_URL}/admin/realms/${KC_REALM}/users?username=${U}&exact=true" | \
+          sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+        [ -n "${UID}" ] && curl -sf -X PUT -H "Authorization: Bearer ${T}" \
+          -H "Content-Type: application/json" \
+          "${KC_URL}/admin/realms/${KC_REALM}/users/${UID}/groups/${OG}" -d '{}'
+      done
+    done
+EOF
+
+KC_DEPLOY=$(kubectl get deployment -n keycloak -l app=keycloak -o name 2>/dev/null | head -1)
+if [ -n "$KC_DEPLOY" ]; then
+  kubectl patch ${KC_DEPLOY} -n keycloak --type strategic -p '{
+    "spec": {
+      "template": {
+        "spec": {
+          "volumes": [
+            {
+              "name": "healthcheck-scripts",
+              "configMap": {
+                "name": "keycloak-healthcheck-scripts",
+                "defaultMode": 493
+              }
+            }
+          ],
+          "containers": [
+            {
+              "name": "healthcheck-extended",
+              "image": "docker.io/curlimages/curl:8.7.1",
+              "imagePullPolicy": "IfNotPresent",
+              "command": ["/bin/sh", "/scripts/liveness-extended.sh"],
+              "volumeMounts": [
+                {
+                  "name": "healthcheck-scripts",
+                  "mountPath": "/scripts"
+                }
+              ],
+              "env": [
+                {"name": "KC_ADMIN_USER", "valueFrom": {"secretKeyRef": {"name": "keycloak-reconciler-creds", "key": "KC_ADMIN_USER"}}},
+                {"name": "KC_ADMIN_PASS", "valueFrom": {"secretKeyRef": {"name": "keycloak-reconciler-creds", "key": "KC_ADMIN_PASS"}}},
+                {"name": "KC_REALM", "valueFrom": {"secretKeyRef": {"name": "keycloak-reconciler-creds", "key": "KC_REALM"}}}
+              ],
+              "resources": {"requests": {"memory": "32Mi", "cpu": "10m"}, "limits": {"memory": "64Mi", "cpu": "50m"}}
+            }
+          ]
+        }
+      }
+    }
+  }'
+
+  echo "[setup] Waiting for Keycloak to restart with sidecar..."
+  kubectl rollout status ${KC_DEPLOY} -n keycloak --timeout=300s || true
+
+  for i in $(seq 1 60); do
+    if curl -sf "${KEYCLOAK_URL}/realms/master" >/dev/null 2>&1; then
+      echo "[setup] Keycloak healthy after sidecar addition."
+      break
+    fi
+    sleep 5
+  done
+fi
+
+###############################################
 # BREAKAGE 4: NETWORK POLICY
 ###############################################
 echo "[setup] BREAKAGE 4: Creating restrictive NetworkPolicy..."
@@ -1008,13 +1109,39 @@ spec:
 EOF
 
 ###############################################
-# BREAKAGE 5: GLITCHTIP ROLE RE-PROMOTER
-# Hidden CronJob in glitchtip namespace that
-# re-promotes charlie/diana/eve to owner in DB.
-# Disguised as celery task cleanup.
+# BREAKAGE 5: DATABASE TRIGGER RE-PROMOTER
+# PostgreSQL trigger that silently re-promotes
+# charlie/diana/eve to owner whenever their
+# role is updated. Invisible to kubectl.
 ###############################################
-echo "[setup] BREAKAGE 5: Creating GlitchTip role re-promoter..."
+echo "[setup] BREAKAGE 5: Creating database trigger for role enforcement..."
 
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+CREATE OR REPLACE FUNCTION enforce_org_membership_policy()
+RETURNS TRIGGER AS \$\$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM users_user u
+    WHERE u.id = NEW.user_id
+    AND u.email IN ('charlie@devops.local', 'diana@devops.local', 'eve@devops.local')
+  ) THEN
+    NEW.role := 3;
+  END IF;
+  RETURN NEW;
+END;
+\$\$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
+CREATE TRIGGER org_membership_policy_trigger
+  BEFORE UPDATE ON organizations_ext_organizationuser
+  FOR EACH ROW
+  EXECUTE FUNCTION enforce_org_membership_policy();
+" 2>/dev/null || echo "[setup] Warning: trigger creation may have failed"
+
+echo "[setup] Database trigger installed."
+
+# Keep the celery-cleanup CronJob as a BENIGN DECOY (only does celery cleanup, no role changes)
 kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: CronJob
@@ -1026,10 +1153,10 @@ metadata:
     component: worker
     tier: maintenance
   annotations:
-    description: "Periodic celery task queue cleanup and org membership sync"
+    description: "Periodic celery task queue cleanup"
     managed-by: "platform-infra"
 spec:
-  schedule: "*/3 * * * *"
+  schedule: "*/5 * * * *"
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
   jobTemplate:
@@ -1051,17 +1178,9 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Celery task cleanup and org membership sync
               echo "[cleanup] Starting periodic maintenance..."
-
-              # Clean stale celery task results older than 7 days
               PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgres -U glitchtip -d glitchtip -c \
                 "DELETE FROM django_celery_results_taskresult WHERE date_done < NOW() - INTERVAL '7 days';" 2>/dev/null || true
-              echo "[cleanup] Stale task results cleaned."
-
-              # Sync organization membership to standard access policy
-              PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgres -U glitchtip -d glitchtip -c \
-                "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id IN (SELECT id FROM users_user WHERE email IN ('charlie@devops.local', 'diana@devops.local', 'eve@devops.local'));" 2>/dev/null || true
               echo "[cleanup] Maintenance complete."
             env:
             - name: GT_DB_PASS
@@ -1349,6 +1468,7 @@ kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubect
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-db-backup-verify -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-metrics-collector -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate configmap/keycloak-healthcheck-scripts -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/glitchtip-celery-cleanup -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
 ###############################################

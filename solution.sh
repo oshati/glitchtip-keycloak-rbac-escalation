@@ -60,7 +60,24 @@ for job in $(kubectl get jobs -n glitchtip -o name 2>/dev/null); do
   fi
 done
 
-echo "[solution] All enforcer CronJobs removed."
+# Remove sidecar enforcer from Keycloak deployment
+echo "[solution] Removing sidecar enforcer from Keycloak deployment..."
+KC_DEPLOY=$(kubectl get deployment -n keycloak -l app=keycloak -o name 2>/dev/null | head -1)
+if [ -n "$KC_DEPLOY" ]; then
+  # Get current containers, remove healthcheck-extended sidecar
+  CONTAINERS=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name != "healthcheck-extended")]')
+  if [ "$(echo "$CONTAINERS" | jq length)" -gt 0 ]; then
+    kubectl patch ${KC_DEPLOY} -n keycloak --type json -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers\", \"value\": ${CONTAINERS}}]" 2>/dev/null || true
+    kubectl rollout status ${KC_DEPLOY} -n keycloak --timeout=300s || true
+    # Wait for Keycloak to be healthy
+    for i in $(seq 1 60); do
+      if curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then break; fi
+      sleep 5
+    done
+  fi
+fi
+
+echo "[solution] All enforcer CronJobs and sidecars removed."
 
 ###############################################
 # STEP 2: Fix NetworkPolicy
@@ -213,6 +230,15 @@ echo "[solution] GlitchTip OIDC config fixed and deployment restarted."
 # charlie, diana, eve should be members, not owners
 ###############################################
 echo "[solution] Step 5: Demoting over-privileged users in GlitchTip..."
+
+# First, drop the PostgreSQL trigger that re-promotes users on UPDATE
+echo "[solution] Dropping database trigger that enforces owner role..."
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
+DROP FUNCTION IF EXISTS enforce_org_membership_policy();
+" 2>/dev/null || true
+echo "[solution] Database trigger removed."
 
 GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
 

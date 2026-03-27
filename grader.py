@@ -274,12 +274,32 @@ def check_owner_token_has_groups(setup_info):
     if error:
         return 0.0, error
 
-    if "/platform-eng/glitchtip-owners" in groups:
-        return 1.0, f"Alice's token contains owners group. Groups: {groups}"
-    elif not groups:
-        return 0.0, "Alice's token has NO groups claim (groups scope not in default client scopes?)"
-    else:
+    if "/platform-eng/glitchtip-owners" not in groups:
+        if not groups:
+            return 0.0, "Alice's token has NO groups claim (groups scope not in default client scopes?)"
         return 0.0, f"Alice's token missing owners group. Groups: {groups}"
+
+    # Also verify GlitchTip pod has correct OIDC env vars applied
+    rc, gt_pod, _ = run_cmd(
+        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
+        "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+    )
+    gt_pod = gt_pod.strip("'") if gt_pod else ""
+    if gt_pod:
+        rc, env_scope, _ = run_cmd(
+            f"kubectl exec -n glitchtip {gt_pod} -- printenv OPENID_CONNECT_SCOPE 2>/dev/null",
+            timeout=10,
+        )
+        rc2, env_group, _ = run_cmd(
+            f"kubectl exec -n glitchtip {gt_pod} -- printenv GLITCHTIP_OIDC_OWNER_GROUP 2>/dev/null",
+            timeout=10,
+        )
+        if env_scope and "groups" not in env_scope:
+            return 0.0, f"Token OK but pod env OPENID_CONNECT_SCOPE missing 'groups': '{env_scope}'"
+        if env_group and env_group != "/platform-eng/glitchtip-owners":
+            return 0.0, f"Token OK but pod env GLITCHTIP_OIDC_OWNER_GROUP wrong: '{env_group}'"
+
+    return 1.0, f"Alice's token contains owners group AND GlitchTip env correct. Groups: {groups}"
 
 
 def check_user_roles_demoted(setup_info):
@@ -385,8 +405,8 @@ def grade(*args, **kwargs) -> GradingResult:
 
     # Durability window — if the enforcer is still active, it will re-corrupt
     # NOTE: We do NOT un-suspend CronJobs — suspension is a valid fix
-    print("[grader] Waiting 90s durability window...")
-    time.sleep(90)
+    print("[grader] Waiting 150s durability window...")
+    time.sleep(150)
 
     checks = {
         "enforcer_neutralized": check_enforcer_neutralized,
