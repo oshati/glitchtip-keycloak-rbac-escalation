@@ -324,6 +324,7 @@ def check_sso_role_mapping_functional(setup_info):
     client_secret = setup_info.get("GLITCHTIP_CLIENT_SECRET", "")
 
     # Get a token for charlie using the glitchtip OIDC client
+    # Don't request specific scopes — let the client's default scopes + mapper handle it
     rc, stdout, _ = run_cmd(
         f'curl -s --connect-timeout 10 --max-time 15 -X POST '
         f'"{kc_url}/realms/{realm}/protocol/openid-connect/token" '
@@ -331,8 +332,7 @@ def check_sso_role_mapping_functional(setup_info):
         f'-d "client_secret={client_secret}" '
         f'-d "grant_type=password" '
         f'-d "username=charlie" '
-        f'-d "password=DevOps2024!" '
-        f'-d "scope=openid profile email groups"'
+        f'-d "password=DevOps2024!"'
     )
 
     if not stdout:
