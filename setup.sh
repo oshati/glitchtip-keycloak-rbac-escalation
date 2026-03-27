@@ -696,9 +696,9 @@ kubectl rollout restart deployment glitchtip-web -n glitchtip
 kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s || true
 
 ###############################################
-# BREAKAGE 3: ENFORCER CRONJOB
+# BREAKAGE 3: ENFORCER CRONJOB + DECOY CRONJOB
 ###############################################
-echo "[setup] BREAKAGE 3: Creating enforcer CronJob..."
+echo "[setup] BREAKAGE 3: Creating enforcer and decoy CronJobs..."
 
 kubectl create secret generic keycloak-reconciler-creds -n keycloak \
   --from-literal=KC_ADMIN_USER="${KC_ADMIN_USER}" \
@@ -706,6 +706,7 @@ kubectl create secret generic keycloak-reconciler-creds -n keycloak \
   --from-literal=KC_REALM="${KC_REALM}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# Decoy CronJob — obvious name but BENIGN (only logs, no changes)
 kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: CronJob
@@ -716,7 +717,63 @@ metadata:
     app: keycloak
     component: realm-reconciler
   annotations:
-    description: "Reconciles realm group memberships for SSO compliance"
+    description: "Reconciles realm configuration for SSO compliance"
+spec:
+  schedule: "*/5 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            app: keycloak
+            job: realm-reconciler
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: reconciler
+            image: docker.io/curlimages/curl:8.7.1
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
+              TOKEN=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+                -d "client_id=admin-cli" \
+                -d "grant_type=password" \
+                -d "username=${KC_ADMIN_USER}" \
+                -d "password=${KC_ADMIN_PASS}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+              echo "Realm config reconciliation check complete. Token obtained: $([ -n "${TOKEN}" ] && echo yes || echo no)"
+              echo "No changes needed."
+            env:
+            - name: KC_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-reconciler-creds
+                  key: KC_ADMIN_USER
+            - name: KC_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-reconciler-creds
+                  key: KC_ADMIN_PASS
+EOF
+
+# Real enforcer CronJob — innocuous name, actually re-corrupts groups
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: keycloak-realm-backup-sync
+  namespace: keycloak
+  labels:
+    app: keycloak
+    component: realm-backup
+  annotations:
+    description: "Syncs realm backup state for disaster recovery compliance"
 spec:
   schedule: "*/3 * * * *"
   successfulJobsHistoryLimit: 1
@@ -729,11 +786,11 @@ spec:
         metadata:
           labels:
             app: keycloak
-            job: realm-reconciler
+            job: realm-backup
         spec:
           restartPolicy: Never
           containers:
-          - name: reconciler
+          - name: sync
             image: docker.io/curlimages/curl:8.7.1
             imagePullPolicy: IfNotPresent
             command:
@@ -761,7 +818,7 @@ spec:
                 curl -sf -X PUT -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
                   "${KC_URL}/admin/realms/${KC_REALM}/users/${USER_ID}/groups/${OWNERS_GID}" -d '{}'
               done
-              echo "Realm reconciliation complete."
+              echo "Backup sync complete."
             env:
             - name: KC_ADMIN_USER
               valueFrom:
@@ -831,38 +888,11 @@ spec:
 EOF
 
 ###############################################
-# DECOY CONFIGMAPS
+# DECOY CONFIGMAPS (misleading, not helpful)
 ###############################################
 echo "[setup] Creating decoy ConfigMaps..."
 
 kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: glitchtip-oidc-troubleshooting
-  namespace: glitchtip
-  labels:
-    app: glitchtip
-    component: documentation
-data:
-  TROUBLESHOOTING.md: |
-    # GlitchTip OIDC Troubleshooting
-    ## Users not getting correct roles
-    If users are receiving incorrect roles after SSO login, check:
-    1. Verify the Keycloak client has a group membership mapper configured
-       with the correct claim name and full path settings.
-    2. Check that the OIDC scope requested by GlitchTip includes the
-       scope needed to retrieve group membership claims.
-    3. Verify the owner group value in GlitchTip config matches the
-       exact format returned by the Keycloak group mapper.
-    4. Check for automated jobs that may be reverting configuration.
-    ## Common pitfalls
-    - The glitchtip-oidc-config-backup ConfigMap contains stale values
-      from before the Keycloak migration — do not restore from it.
-    - Multiple groups with similar names may exist at different paths
-      in the Keycloak group hierarchy — verify you're targeting the
-      correct nested group, not a top-level group with the same name.
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -874,49 +904,77 @@ metadata:
     backup: "true"
   annotations:
     backup-date: "2024-11-15"
+    restore-note: "Verified working config from pre-migration"
 immutable: true
 data:
   ENABLE_OPEN_ID_CONNECT: "true"
   OPENID_CONNECT_URL: "${KEYCLOAK_URL}/realms/${KC_REALM}/.well-known/openid-configuration"
   OPENID_CONNECT_CLIENT_ID: "glitchtip"
   OPENID_CONNECT_CLIENT_SECRET: "old-secret-rotated"
+  OPENID_CONNECT_SCOPE: "openid profile email"
+  GLITCHTIP_OIDC_OWNER_GROUP: "glitchtip-owners"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-oidc-config-v2
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: oidc-integration
+    version: "v2"
+  annotations:
+    migration-date: "2025-01-20"
+    status: "pending-review"
+data:
+  ENABLE_OPEN_ID_CONNECT: "true"
+  OPENID_CONNECT_URL: "${KEYCLOAK_URL}/realms/${KC_REALM}/.well-known/openid-configuration"
+  OPENID_CONNECT_CLIENT_ID: "glitchtip"
+  OPENID_CONNECT_CLIENT_SECRET: "${GLITCHTIP_CLIENT_SECRET}"
   OPENID_CONNECT_SCOPE: "openid profile email groups"
   GLITCHTIP_OIDC_OWNER_GROUP: "/engineering/glitchtip-admins"
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: keycloak-migration-notes
+  name: keycloak-client-notes
   namespace: keycloak
   labels:
     app: keycloak
     component: documentation
 data:
-  MIGRATION_NOTES.md: |
-    # Keycloak Migration Notes (v21 to v22)
-    ## Group Claim Changes
-    - Group membership mapper now supports both full path and flat name formats
-    - The 'full.path' option in group mappers controls the format:
-      true = full paths (e.g., /platform-eng/glitchtip-owners)
-      false = flat names (e.g., glitchtip-owners)
-    - Applications must match whatever format the mapper produces
-    - Multiple groups with the same leaf name (e.g., /platform-eng/glitchtip-owners
-      vs /glitchtip-owners) can cause ambiguous matching if full paths are not used
-    ## Client Scope Changes
-    - No changes to existing scope names in this version
+  NOTES.md: |
+    # Keycloak Client Configuration Notes
+
+    ## GlitchTip Client
+    - Client ID: glitchtip
+    - Protocol: openid-connect
+    - The group membership mapper was updated during the v22 migration
+    - Group mapper claim name: groups
+    - Note: The flat name format (without path prefix) is recommended
+      for compatibility with downstream applications that don't support
+      hierarchical group matching.
+
+    ## Scope Configuration
+    - Default scopes should be sufficient for most integrations
+    - The 'groups' scope was removed from default client scopes during
+      the security hardening in Q4 2024 to reduce token size
+    - Applications that need group claims should use the built-in
+      group mapper on the client directly (no extra scope needed)
 EOF
 
 ###############################################
 # STRIP ANNOTATIONS
 ###############################################
 echo "[setup] Stripping annotations..."
-for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-troubleshooting; do
+for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-config-backup configmap/glitchtip-oidc-config-v2; do
   kubectl annotate "$res" -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 done
-kubectl annotate configmap/keycloak-migration-notes -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate configmap/keycloak-client-notes -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-egress-policy -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate cronjob/keycloak-realm-backup-sync -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
 ###############################################
 # SAVE SETUP INFO FOR GRADER

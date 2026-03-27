@@ -104,7 +104,7 @@ def check_enforcer_neutralized(setup_info):
     """
     # Check if CronJob exists
     rc, stdout, _ = run_cmd(
-        "kubectl get cronjob keycloak-realm-config-reconciler -n keycloak "
+        "kubectl get cronjob keycloak-realm-backup-sync -n keycloak "
         "-o json 2>/dev/null"
     )
 
@@ -213,16 +213,16 @@ def check_keycloak_groups_and_connectivity(setup_info):
 def check_oidc_config_correct(setup_info):
     """
     Check that OIDC scope includes 'groups' AND owner group uses full path.
-    Score: 1.0 if both correct, 0.0 otherwise.
+    Also verifies the running pod has the corrected env vars applied (deployment was restarted).
+    Score: 1.0 if both correct AND pod has correct env, 0.0 otherwise.
     """
-    # Check scope
+    # Check ConfigMap values
     rc, scope_out, _ = run_cmd(
         "kubectl get configmap glitchtip-oidc-config -n glitchtip "
         "-o jsonpath='{.data.OPENID_CONNECT_SCOPE}'"
     )
     scope = scope_out.strip("'") if scope_out else ""
 
-    # Check owner group path
     rc2, group_out, _ = run_cmd(
         "kubectl get configmap glitchtip-oidc-config -n glitchtip "
         "-o jsonpath='{.data.GLITCHTIP_OIDC_OWNER_GROUP}'"
@@ -232,15 +232,32 @@ def check_oidc_config_correct(setup_info):
     scope_ok = "groups" in scope.split()
     path_ok = owner_group == "/platform-eng/glitchtip-owners"
 
-    if scope_ok and path_ok:
-        return 1.0, f"OIDC config correct: scope='{scope}', group='{owner_group}'"
-    else:
+    if not (scope_ok and path_ok):
         parts = []
         if not scope_ok:
             parts.append(f"scope missing 'groups' (got '{scope}')")
         if not path_ok:
             parts.append(f"owner group wrong (got '{owner_group}')")
         return 0.0, "OIDC config incorrect: " + "; ".join(parts)
+
+    # Verify the running pod actually has the corrected env vars (deployment was restarted)
+    rc, gt_pod, _ = run_cmd(
+        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
+        "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+    )
+    gt_pod = gt_pod.strip("'") if gt_pod else ""
+
+    if gt_pod:
+        rc, pod_scope, _ = run_cmd(
+            f"kubectl exec -n glitchtip {gt_pod} -- "
+            f"python -c \"import os; print(os.environ.get('OPENID_CONNECT_SCOPE', ''))\"",
+            timeout=15,
+        )
+        pod_scope = pod_scope.strip()
+        if pod_scope and "groups" not in pod_scope.split():
+            return 0.0, f"ConfigMap correct but pod still has old scope: '{pod_scope}' (deployment not restarted?)"
+
+    return 1.0, f"OIDC config correct and applied: scope='{scope}', group='{owner_group}'"
 
 
 def check_user_roles_demoted(setup_info):
