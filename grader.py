@@ -77,17 +77,24 @@ def check_keycloak_groups_correct(setup_info):
     realm = setup_info.get("KC_REALM", "devops")
     owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
 
-    token = get_kc_token(setup_info)
+    # Retry token acquisition (may fail transiently after durability window)
+    token = None
+    for attempt in range(5):
+        token = get_kc_token(setup_info)
+        if token:
+            break
+        time.sleep(5)
+
     if not token or not owners_group_id:
-        return 0.0, "Could not get Keycloak token or owners group ID"
+        return 0.0, f"Could not get Keycloak token (token={bool(token)}) or owners group ID (id={owners_group_id})"
 
     rc, stdout, _ = run_cmd(
-        f'curl -sf -H "Authorization: Bearer {token}" '
+        f'curl -s -H "Authorization: Bearer {token}" '
         f'"{kc_url}/admin/realms/{realm}/groups/{owners_group_id}/members"'
     )
 
     if rc != 0:
-        return 0.0, "Failed to query Keycloak group members"
+        return 0.0, f"Failed to query Keycloak group members: rc={rc}"
 
     try:
         members = json.loads(stdout)
