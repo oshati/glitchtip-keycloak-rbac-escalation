@@ -2,14 +2,18 @@
 """
 Grader for glitchtip-keycloak-rbac-escalation task.
 
-5 subscores, each weight 1/5, each testing ONE thing:
-1. enforcer_neutralized — The CronJob is no longer re-corrupting group memberships (deleted, suspended, or fixed)
-2. keycloak_groups_and_connectivity — GlitchTip can reach Keycloak AND only alice, bob in owners group
-3. oidc_config_correct — OIDC scope includes 'groups' AND owner group uses full path
-4. user_roles_demoted — Non-admin users have member role in GlitchTip
-5. sso_role_mapping_functional — End-to-end: Keycloak token for a non-admin user does NOT contain the owners group
+ALL checks are end-to-end FUNCTIONAL tests — they verify actual system behavior,
+not configuration file values.
+
+5 subscores, each weight 1/5:
+1. enforcer_neutralized — Group memberships stay correct over 90s (not re-corrupted)
+2. keycloak_groups_and_connectivity — GlitchTip pod can reach Keycloak AND owner group has only alice, bob
+3. owner_token_has_groups — alice's OIDC token contains /platform-eng/glitchtip-owners in groups claim
+4. user_roles_demoted — charlie, diana, eve have member role (not owner) in GlitchTip database
+5. non_owner_token_excludes_group — charlie's OIDC token does NOT contain /platform-eng/glitchtip-owners
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -46,20 +50,19 @@ def load_setup_info():
     return info
 
 
-def get_kc_token(setup_info, username="admin", password=None):
-    """Get Keycloak token. Uses k8s service DNS for reliability."""
+def get_kc_admin_token(setup_info):
+    """Get Keycloak admin token via master realm."""
     kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
-    if password is None:
-        password = setup_info.get("KC_ADMIN_PASS", "admin123")
+    kc_pass = setup_info.get("KC_ADMIN_PASS", "admin123")
 
     for attempt in range(5):
-        rc, stdout, stderr = run_cmd(
+        rc, stdout, _ = run_cmd(
             f'curl -s --connect-timeout 10 --max-time 15 -X POST '
             f'"{kc_url}/realms/master/protocol/openid-connect/token" '
             f'-d "client_id=admin-cli" '
             f'-d "grant_type=password" '
-            f'-d "username={username}" '
-            f'-d "password={password}"'
+            f'-d "username=admin" '
+            f'-d "password={kc_pass}"'
         )
         if rc == 0 and stdout:
             try:
@@ -72,8 +75,12 @@ def get_kc_token(setup_info, username="admin", password=None):
     return None
 
 
-def get_user_token(setup_info, username, password="DevOps2024!"):
-    """Get Keycloak token for a regular user via the devops realm."""
+def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
+    """
+    Get a user's OIDC token via the glitchtip client in the devops realm.
+    Uses default client scopes — does NOT explicitly request 'groups' scope.
+    The 'groups' scope must be a default client scope for groups to appear.
+    """
     kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     realm = setup_info.get("KC_REALM", "devops")
     client_secret = setup_info.get("GLITCHTIP_CLIENT_SECRET", "")
@@ -85,53 +92,48 @@ def get_user_token(setup_info, username, password="DevOps2024!"):
         f'-d "client_secret={client_secret}" '
         f'-d "grant_type=password" '
         f'-d "username={username}" '
-        f'-d "password={password}" '
-        f'-d "scope=openid profile email groups"'
+        f'-d "password={password}"'
     )
-    if rc == 0 and stdout:
-        try:
-            return json.loads(stdout).get("access_token")
-        except json.JSONDecodeError:
-            pass
-    return None
+
+    if not stdout:
+        return None, "Empty response"
+
+    try:
+        resp = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None, f"Not JSON: {stdout[:200]}"
+
+    token = resp.get("access_token")
+    if not token:
+        return None, resp.get("error_description", resp.get("error", "no token"))
+
+    return token, None
+
+
+def decode_jwt_groups(token):
+    """Decode JWT and extract groups claim."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("groups", []), None
+    except Exception as e:
+        return [], f"JWT decode error: {e}"
 
 
 def check_enforcer_neutralized(setup_info):
     """
-    Check that the enforcer CronJob is no longer actively re-corrupting config.
-    Accepts: deleted, suspended, or modified to no longer add wrong users.
-    Score: 1.0 if neutralized, 0.0 if still re-corrupting.
+    FUNCTIONAL: Verify group memberships stay correct (not re-corrupted by enforcer).
+    The 90s durability window already elapsed before this check runs.
+    If the enforcer is still active, groups will have been re-corrupted.
     """
-    # Check if CronJob exists
-    rc, stdout, _ = run_cmd(
-        "kubectl get cronjob keycloak-cert-renewal-check -n keycloak "
-        "-o json 2>/dev/null"
-    )
-
-    if rc != 0 or not stdout:
-        # CronJob deleted — neutralized
-        return 1.0, "Enforcer CronJob deleted"
-
-    try:
-        cj = json.loads(stdout)
-    except json.JSONDecodeError:
-        return 1.0, "Enforcer CronJob not found (parse error)"
-
-    # Check if suspended
-    if cj.get("spec", {}).get("suspend", False):
-        return 1.0, "Enforcer CronJob suspended"
-
-    # CronJob exists and is not suspended — check if it was modified
-    # to no longer add wrong users (check if charlie/diana/eve are NOT
-    # in the script). This is a functional check via the group membership.
-    # If groups are correct despite CronJob running, agent fixed the script.
     kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     realm = setup_info.get("KC_REALM", "devops")
     owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
 
-    token = get_kc_token(setup_info)
+    token = get_kc_admin_token(setup_info)
     if not token or not owners_group_id:
-        return 0.0, "Enforcer CronJob still active and could not verify group state"
+        return 0.0, "Could not get Keycloak admin token or owners group ID"
 
     rc, stdout, _ = run_cmd(
         f'curl -s -H "Authorization: Bearer {token}" '
@@ -142,40 +144,43 @@ def check_enforcer_neutralized(setup_info):
         members = json.loads(stdout)
         usernames = sorted([m["username"] for m in members])
     except (json.JSONDecodeError, KeyError):
-        return 0.0, "Enforcer CronJob still active and group state could not be verified"
+        return 0.0, f"Failed to parse group members: {stdout[:200]}"
 
-    # If groups are correct despite CronJob existing, agent must have fixed the script
     if usernames == ["alice", "bob"]:
-        return 1.0, "Enforcer CronJob modified — groups remain correct"
+        return 1.0, f"Groups stable after durability window: {usernames}"
     else:
-        return 0.0, f"Enforcer CronJob still active, groups corrupted: {usernames}"
+        return 0.0, f"Groups re-corrupted (enforcer still active): {usernames}"
 
 
 def check_keycloak_groups_and_connectivity(setup_info):
     """
-    Check that GlitchTip can reach Keycloak AND only alice, bob are in owners group.
-    Score: 1.0 if both pass, 0.0 otherwise.
+    FUNCTIONAL: GlitchTip pod can reach Keycloak OIDC discovery endpoint
+    AND only alice, bob are in the owners group.
     """
-    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     realm = setup_info.get("KC_REALM", "devops")
     owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
 
-    # Check connectivity from GlitchTip pod
+    # Find GlitchTip pod
     rc, gt_pod, _ = run_cmd(
         "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
         "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
     )
     gt_pod = gt_pod.strip("'") if gt_pod else ""
-
     if not gt_pod:
         return 0.0, "No GlitchTip pod found"
 
+    # Test connectivity from inside the pod
     connectivity_ok = False
     for attempt in range(10):
-        for url in ["http://keycloak.devops.local:8080", "http://keycloak.keycloak.svc.cluster.local:8080"]:
+        for url in [
+            "http://keycloak.devops.local:8080",
+            "http://keycloak.keycloak.svc.cluster.local:8080",
+        ]:
             rc, stdout, _ = run_cmd(
                 f"kubectl exec -n glitchtip {gt_pod} -- "
-                f"python -c \"import urllib.request; r = urllib.request.urlopen('{url}/realms/{realm}/.well-known/openid-configuration', timeout=5); print(r.status)\"",
+                f"python -c \"import urllib.request; r = urllib.request.urlopen("
+                f"'{url}/realms/{realm}/.well-known/openid-configuration', timeout=5); "
+                f"print(r.status)\"",
                 timeout=15,
             )
             if rc == 0 and "200" in stdout:
@@ -186,12 +191,13 @@ def check_keycloak_groups_and_connectivity(setup_info):
         time.sleep(3)
 
     if not connectivity_ok:
-        return 0.0, "GlitchTip cannot reach Keycloak OIDC endpoint"
+        return 0.0, "GlitchTip pod cannot reach Keycloak OIDC endpoint"
 
-    # Check group membership
-    token = get_kc_token(setup_info)
+    # Verify group membership via Keycloak API
+    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
+    token = get_kc_admin_token(setup_info)
     if not token or not owners_group_id:
-        return 0.0, "Connectivity OK but could not get Keycloak token to check groups"
+        return 0.0, "Connectivity OK but could not check groups"
 
     rc, stdout, _ = run_cmd(
         f'curl -s -H "Authorization: Bearer {token}" '
@@ -207,70 +213,48 @@ def check_keycloak_groups_and_connectivity(setup_info):
     if usernames == ["alice", "bob"]:
         return 1.0, f"Connectivity OK and owners group correct: {usernames}"
     else:
-        return 0.0, f"Connectivity OK but owners group wrong: {usernames} (expected [alice, bob])"
+        return 0.0, f"Connectivity OK but owners group wrong: {usernames}"
 
 
-def check_oidc_config_correct(setup_info):
+def check_owner_token_has_groups(setup_info):
     """
-    Check that OIDC scope includes 'groups' AND owner group uses full path.
-    Also verifies the running pod has the corrected env vars applied (deployment was restarted).
-    Score: 1.0 if both correct AND pod has correct env, 0.0 otherwise.
+    FUNCTIONAL END-TO-END: Get an OIDC token for alice (owner) via the glitchtip
+    client using DEFAULT scopes only. Verify the token contains
+    /platform-eng/glitchtip-owners in the groups claim.
+
+    This proves:
+    - The 'groups' client scope is configured as a default scope on the client
+    - The group membership mapper produces full paths
+    - Alice is in the correct group
+    - The entire OIDC token pipeline works
     """
-    # Check ConfigMap values
-    rc, scope_out, _ = run_cmd(
-        "kubectl get configmap glitchtip-oidc-config -n glitchtip "
-        "-o jsonpath='{.data.OPENID_CONNECT_SCOPE}'"
-    )
-    scope = scope_out.strip("'") if scope_out else ""
+    token, error = get_user_oidc_token(setup_info, "alice")
+    if not token:
+        return 0.0, f"Could not get OIDC token for alice: {error}"
 
-    rc2, group_out, _ = run_cmd(
-        "kubectl get configmap glitchtip-oidc-config -n glitchtip "
-        "-o jsonpath='{.data.GLITCHTIP_OIDC_OWNER_GROUP}'"
-    )
-    owner_group = group_out.strip("'") if group_out else ""
+    groups, error = decode_jwt_groups(token)
+    if error:
+        return 0.0, error
 
-    scope_ok = "groups" in scope.split()
-    path_ok = owner_group == "/platform-eng/glitchtip-owners"
-
-    if not (scope_ok and path_ok):
-        parts = []
-        if not scope_ok:
-            parts.append(f"scope missing 'groups' (got '{scope}')")
-        if not path_ok:
-            parts.append(f"owner group wrong (got '{owner_group}')")
-        return 0.0, "OIDC config incorrect: " + "; ".join(parts)
-
-    # Verify the running pod actually has the corrected env vars (deployment was restarted)
-    rc, gt_pod, _ = run_cmd(
-        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
-        "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
-    )
-    gt_pod = gt_pod.strip("'") if gt_pod else ""
-
-    if gt_pod:
-        rc, pod_scope, _ = run_cmd(
-            f"kubectl exec -n glitchtip {gt_pod} -- "
-            f"python -c \"import os; print(os.environ.get('OPENID_CONNECT_SCOPE', ''))\"",
-            timeout=15,
-        )
-        pod_scope = pod_scope.strip()
-        if pod_scope and "groups" not in pod_scope.split():
-            return 0.0, f"ConfigMap correct but pod still has old scope: '{pod_scope}' (deployment not restarted?)"
-
-    return 1.0, f"OIDC config correct and applied: scope='{scope}', group='{owner_group}'"
+    if "/platform-eng/glitchtip-owners" in groups:
+        return 1.0, f"Alice's token contains owners group. Groups: {groups}"
+    elif not groups:
+        return 0.0, "Alice's token has NO groups claim (groups scope not in default client scopes?)"
+    else:
+        return 0.0, f"Alice's token missing owners group. Groups: {groups}"
 
 
 def check_user_roles_demoted(setup_info):
     """
-    Check that charlie, diana, eve have member role (not owner) in GlitchTip.
-    Score: 1.0 if all three are demoted, 0.0 otherwise.
+    FUNCTIONAL: Query GlitchTip's actual database to verify charlie, diana, eve
+    have member role (not owner). The database IS the source of truth for
+    application-level permissions.
     """
     rc, gt_pod, _ = run_cmd(
         "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
         "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
     )
     gt_pod = gt_pod.strip("'") if gt_pod else ""
-
     if not gt_pod:
         return 0.0, "No GlitchTip pod found"
 
@@ -294,115 +278,84 @@ def check_user_roles_demoted(setup_info):
     with open("/tmp/gt_check_roles.py", "w") as f:
         f.write(check_script)
 
-    run_cmd(f"kubectl cp /tmp/gt_check_roles.py glitchtip/{gt_pod}:/tmp/gt_check_roles.py", timeout=10)
+    run_cmd(
+        f"kubectl cp /tmp/gt_check_roles.py glitchtip/{gt_pod}:/tmp/gt_check_roles.py",
+        timeout=10,
+    )
 
     rc, stdout, stderr = run_cmd(
-        f"kubectl exec -n glitchtip {gt_pod} -- bash -c 'cd /code && python manage.py shell < /tmp/gt_check_roles.py'",
+        f"kubectl exec -n glitchtip {gt_pod} -- "
+        f"bash -c 'cd /code && python manage.py shell < /tmp/gt_check_roles.py'",
         timeout=30,
     )
 
     if rc != 0:
-        return 0.0, f"Failed to query GlitchTip user roles: {stderr[:200]}"
+        return 0.0, f"Failed to query roles: {stderr[:200]}"
 
     try:
-        json_line = [line for line in stdout.split("\n") if line.startswith("{")]
+        json_line = [l for l in stdout.split("\n") if l.startswith("{")]
         if not json_line:
-            return 0.0, f"No JSON output from role check: {stdout[:200]}"
+            return 0.0, f"No JSON output: {stdout[:200]}"
         results = json.loads(json_line[-1])
     except (json.JSONDecodeError, IndexError):
-        return 0.0, f"Failed to parse role check output: {stdout[:200]}"
+        return 0.0, f"Parse error: {stdout[:200]}"
 
     all_demoted = True
-    feedback_parts = []
-
+    parts = []
     for email in ["charlie@devops.local", "diana@devops.local", "eve@devops.local"]:
-        user_info = results.get(email, {})
-        if user_info.get("is_owner", True):
+        info = results.get(email, {})
+        if info.get("is_owner", True):
             all_demoted = False
-            feedback_parts.append(f"{email} still has owner role")
+            parts.append(f"{email} still owner")
         else:
-            feedback_parts.append(f"{email} demoted")
+            parts.append(f"{email} demoted")
 
     if all_demoted:
-        return 1.0, "All non-admin users demoted: " + "; ".join(feedback_parts)
+        return 1.0, "All demoted: " + "; ".join(parts)
     else:
-        return 0.0, "Some users still owner: " + "; ".join(feedback_parts)
+        return 0.0, "Still owners: " + "; ".join(parts)
 
 
-def check_sso_role_mapping_functional(setup_info):
+def check_non_owner_token_excludes_group(setup_info):
     """
-    End-to-end functional check: get a token for charlie (non-admin) and verify
-    the /platform-eng/glitchtip-owners group is NOT in the token's groups claim.
-    This tests that the OIDC flow would assign the correct role.
-    Score: 1.0 if charlie's token does NOT contain the owners group, 0.0 otherwise.
+    FUNCTIONAL END-TO-END: Get an OIDC token for charlie (non-owner) via the
+    glitchtip client. Verify /platform-eng/glitchtip-owners is NOT in the
+    groups claim. This proves the group membership fix is working end-to-end
+    through the OIDC pipeline.
     """
-    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
-    realm = setup_info.get("KC_REALM", "devops")
-    client_secret = setup_info.get("GLITCHTIP_CLIENT_SECRET", "")
+    token, error = get_user_oidc_token(setup_info, "charlie")
+    if not token:
+        return 0.0, f"Could not get OIDC token for charlie: {error}"
 
-    # Get a token for charlie using the glitchtip OIDC client
-    # Don't request specific scopes — let the client's default scopes + mapper handle it
-    rc, stdout, _ = run_cmd(
-        f'curl -s --connect-timeout 10 --max-time 15 -X POST '
-        f'"{kc_url}/realms/{realm}/protocol/openid-connect/token" '
-        f'-d "client_id=glitchtip" '
-        f'-d "client_secret={client_secret}" '
-        f'-d "grant_type=password" '
-        f'-d "username=charlie" '
-        f'-d "password=DevOps2024!"'
-    )
-
-    if not stdout:
-        return 0.0, "Could not get token for charlie"
-
-    try:
-        token_response = json.loads(stdout)
-        access_token = token_response.get("access_token")
-    except json.JSONDecodeError:
-        return 0.0, f"Token response not JSON: {stdout[:200]}"
-
-    if not access_token:
-        error = token_response.get("error_description", token_response.get("error", "unknown"))
-        return 0.0, f"No access token for charlie: {error}"
-
-    # Decode JWT payload (base64, no verification needed for grading)
-    import base64
-    try:
-        payload_b64 = access_token.split(".")[1]
-        # Add padding
-        payload_b64 += "=" * (4 - len(payload_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception as e:
-        return 0.0, f"Failed to decode token: {e}"
-
-    groups = payload.get("groups", [])
+    groups, error = decode_jwt_groups(token)
+    if error:
+        return 0.0, error
 
     if "/platform-eng/glitchtip-owners" in groups:
         return 0.0, f"Charlie's token still contains owners group: {groups}"
     else:
-        return 1.0, f"Charlie's token correctly excludes owners group. Groups: {groups}"
+        return 1.0, f"Charlie correctly excluded from owners. Groups: {groups}"
 
 
 def grade(*args, **kwargs) -> GradingResult:
-    """Main grading function."""
+    """Main grading function. ALL checks are functional end-to-end tests."""
     os.environ["KUBECONFIG"] = "/etc/rancher/k3s/k3s.yaml"
     setup_info = load_setup_info()
 
     # Pre-cleanup: kill any ubuntu background processes
     run_cmd("pkill -u ubuntu 2>/dev/null || true")
 
-    # Wait durability window — if the enforcer is still active, it will re-corrupt
+    # Durability window — if the enforcer is still active, it will re-corrupt
     # NOTE: We do NOT un-suspend CronJobs — suspension is a valid fix
     print("[grader] Waiting 90s durability window...")
     time.sleep(90)
 
-    # Run all checks
     checks = {
         "enforcer_neutralized": check_enforcer_neutralized,
         "keycloak_groups_and_connectivity": check_keycloak_groups_and_connectivity,
-        "oidc_config_correct": check_oidc_config_correct,
+        "owner_token_has_groups": check_owner_token_has_groups,
         "user_roles_demoted": check_user_roles_demoted,
-        "sso_role_mapping_functional": check_sso_role_mapping_functional,
+        "non_owner_token_excludes_group": check_non_owner_token_excludes_group,
     }
 
     weight = 1.0 / len(checks)
@@ -414,11 +367,13 @@ def grade(*args, **kwargs) -> GradingResult:
         try:
             score, feedback = check_fn(setup_info)
         except Exception as e:
-            score, feedback = 0.0, f"Check raised exception: {e}"
+            score, feedback = 0.0, f"Exception: {e}"
 
         subscores[name] = score
         weights[name] = weight
-        feedback_parts.append(f"[{name}] {'PASS' if score > 0 else 'FAIL'}: {feedback}")
+        feedback_parts.append(
+            f"[{name}] {'PASS' if score > 0 else 'FAIL'}: {feedback}"
+        )
         print(f"[grader] {name}: {score} — {feedback}")
 
     total_score = sum(subscores[k] * weights[k] for k in subscores)

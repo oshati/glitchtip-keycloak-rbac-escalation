@@ -144,11 +144,33 @@ done
 echo "[solution] Keycloak group memberships fixed."
 
 ###############################################
-# STEP 4: Fix GlitchTip OIDC ConfigMap
-# Restore 'groups' scope and full group path
+# STEP 4: Fix Keycloak client scopes + GlitchTip OIDC ConfigMap
 ###############################################
-echo "[solution] Step 4: Fixing GlitchTip OIDC ConfigMap..."
+echo "[solution] Step 4: Fixing OIDC scope configuration..."
 
+# Re-add 'groups' scope as a default client scope on the glitchtip OIDC client
+# (setup moved it from default to optional, so tokens don't include groups)
+KC_TOKEN=$(get_kc_token)
+CLIENT_UUID=$(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
+  "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/clients?clientId=glitchtip" | jq -r '.[0].id')
+
+GROUPS_SCOPE_ID=$(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
+  "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/client-scopes" | \
+  jq -r '.[] | select(.name=="groups") | .id')
+
+if [ -n "$GROUPS_SCOPE_ID" ] && [ -n "$CLIENT_UUID" ]; then
+  # Remove from optional scopes and add to default scopes
+  curl -sf -X DELETE -H "Authorization: Bearer ${KC_TOKEN}" \
+    "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/clients/${CLIENT_UUID}/optional-client-scopes/${GROUPS_SCOPE_ID}" 2>/dev/null || true
+  curl -sf -X PUT -H "Authorization: Bearer ${KC_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" \
+    -d '{}' 2>/dev/null || true
+  echo "[solution] 'groups' scope re-added as default client scope."
+fi
+
+# Fix GlitchTip OIDC ConfigMap
+echo "[solution] Patching GlitchTip OIDC ConfigMap..."
 kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
   "data": {
     "OPENID_CONNECT_SCOPE": "openid profile email groups",

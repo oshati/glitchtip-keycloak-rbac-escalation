@@ -488,15 +488,38 @@ fi
 echo "[setup] Client UUID: ${CLIENT_UUID}"
 
 ###############################################
-# KEYCLOAK: ADD GROUP MEMBERSHIP MAPPER
+# KEYCLOAK: CREATE 'groups' CLIENT SCOPE WITH MAPPER
+# The mapper is on a SCOPE (not the client directly),
+# so the 'groups' scope MUST be requested for group
+# claims to appear in tokens.
 ###############################################
-echo "[setup] Adding group membership mapper..."
+echo "[setup] Creating 'groups' client scope with mapper..."
 
-EXISTING_MAPPER=$(kc_api GET "/clients/${CLIENT_UUID}/protocol-mappers/models" 2>/dev/null | \
+# Create the 'groups' client scope
+GROUPS_SCOPE_ID=$(kc_api GET "/client-scopes" 2>/dev/null | \
+  jq -r '.[] | select(.name=="groups") | .id // empty')
+
+if [ -z "$GROUPS_SCOPE_ID" ]; then
+  kc_api POST "/client-scopes" -d '{
+    "name": "groups",
+    "protocol": "openid-connect",
+    "attributes": {
+      "include.in.token.scope": "true",
+      "display.on.consent.screen": "false"
+    }
+  }'
+  GROUPS_SCOPE_ID=$(kc_api GET "/client-scopes" | \
+    jq -r '.[] | select(.name=="groups") | .id')
+fi
+
+echo "[setup] Groups scope ID: ${GROUPS_SCOPE_ID}"
+
+# Add group-membership mapper to the 'groups' scope
+EXISTING_MAPPER=$(kc_api GET "/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models" 2>/dev/null | \
   jq -r '.[] | select(.name=="group-membership") | .id // empty')
 
 if [ -z "$EXISTING_MAPPER" ]; then
-  kc_api POST "/clients/${CLIENT_UUID}/protocol-mappers/models" -d '{
+  kc_api POST "/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models" -d '{
     "name": "group-membership",
     "protocol": "openid-connect",
     "protocolMapper": "oidc-group-membership-mapper",
@@ -509,6 +532,12 @@ if [ -z "$EXISTING_MAPPER" ]; then
     }
   }'
 fi
+
+# Add 'groups' as a DEFAULT client scope for the glitchtip client
+# (correct state — will be removed during breakage)
+kc_api PUT "/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" -d '{}' 2>/dev/null || true
+
+echo "[setup] Groups scope configured and added to glitchtip client."
 
 ###############################################
 # KEYCLOAK: CREATE GROUP HIERARCHY
@@ -685,7 +714,7 @@ done
 ###############################################
 # BREAKAGE 2: GLITCHTIP OIDC CONFIGMAP
 ###############################################
-echo "[setup] BREAKAGE 2: Corrupting GlitchTip OIDC config..."
+echo "[setup] BREAKAGE 2: Corrupting OIDC config + removing groups scope from Keycloak client..."
 kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
   "data": {
     "OPENID_CONNECT_SCOPE": "openid profile email",
@@ -694,6 +723,13 @@ kubectl patch configmap glitchtip-oidc-config -n glitchtip --type merge -p '{
 }'
 kubectl rollout restart deployment glitchtip-web -n glitchtip
 kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s || true
+
+# Also remove 'groups' from client's default scopes in Keycloak
+# so tokens won't include groups even if the scope is requested
+kc_api DELETE "/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" 2>/dev/null || true
+# Move it to optional scopes (agent must re-add it to defaults or request it explicitly)
+kc_api PUT "/clients/${CLIENT_UUID}/optional-client-scopes/${GROUPS_SCOPE_ID}" -d '{}' 2>/dev/null || true
+echo "[setup] Groups scope moved from default to optional on glitchtip client."
 
 ###############################################
 # BREAKAGE 3: ENFORCER CRONJOB + DECOY CRONJOB
@@ -1249,6 +1285,7 @@ GLITCHTIP_CLIENT_SECRET=${GLITCHTIP_CLIENT_SECRET}
 CLIENT_UUID=${CLIENT_UUID}
 OWNERS_GROUP_ID=${OWNERS_GROUP_ID}
 USERS_GROUP_ID=${USERS_GROUP_ID}
+GROUPS_SCOPE_ID=${GROUPS_SCOPE_ID}
 OWNER_USERS=alice,bob
 MEMBER_USERS=charlie,diana,eve
 USER_PASS=${USER_PASS}
