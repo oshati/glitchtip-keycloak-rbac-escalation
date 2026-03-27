@@ -48,13 +48,15 @@ def load_setup_info():
 
 
 def get_kc_token(setup_info):
-    """Get Keycloak admin token."""
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
+    """Get Keycloak admin token. Uses k8s service DNS for reliability."""
+    # Use k8s service DNS directly (more reliable than dnsmasq)
+    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     kc_user = setup_info.get("KC_ADMIN_USER", "admin")
     kc_pass = setup_info.get("KC_ADMIN_PASS", "admin123")
 
-    rc, stdout, _ = run_cmd(
-        f'curl -s -X POST "{kc_url}/realms/master/protocol/openid-connect/token" '
+    rc, stdout, stderr = run_cmd(
+        f'curl -s --connect-timeout 10 --max-time 15 -X POST '
+        f'"{kc_url}/realms/master/protocol/openid-connect/token" '
         f'-d "client_id=admin-cli" '
         f'-d "grant_type=password" '
         f'-d "username={kc_user}" '
@@ -64,7 +66,9 @@ def get_kc_token(setup_info):
         try:
             return json.loads(stdout).get("access_token")
         except json.JSONDecodeError:
-            pass
+            print(f"[grader] Token response not JSON: {stdout[:200]}")
+    else:
+        print(f"[grader] Token request failed: rc={rc}, stderr={stderr[:200]}")
     return None
 
 
@@ -73,7 +77,7 @@ def check_keycloak_groups_correct(setup_info):
     Check that ONLY alice and bob are members of /platform-eng/glitchtip-owners.
     Score: 1.0 if exactly {alice, bob}, 0.0 otherwise.
     """
-    kc_url = setup_info.get("KEYCLOAK_URL", "http://keycloak.devops.local:8080")
+    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     realm = setup_info.get("KC_REALM", "devops")
     owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
 
