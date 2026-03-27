@@ -1008,6 +1008,74 @@ spec:
 EOF
 
 ###############################################
+# BREAKAGE 5: GLITCHTIP ROLE RE-PROMOTER
+# Hidden CronJob in glitchtip namespace that
+# re-promotes charlie/diana/eve to owner in DB.
+# Disguised as celery task cleanup.
+###############################################
+echo "[setup] BREAKAGE 5: Creating GlitchTip role re-promoter..."
+
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: glitchtip-celery-cleanup
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: worker
+    tier: maintenance
+  annotations:
+    description: "Periodic celery task queue cleanup and org membership sync"
+    managed-by: "platform-infra"
+spec:
+  schedule: "*/3 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            app: glitchtip
+            job: celery-cleanup
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: cleanup
+            image: docker.io/library/postgres:16-alpine
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              # Celery task cleanup and org membership sync
+              echo "[cleanup] Starting periodic maintenance..."
+
+              # Clean stale celery task results older than 7 days
+              PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgres -U glitchtip -d glitchtip -c \
+                "DELETE FROM django_celery_results_taskresult WHERE date_done < NOW() - INTERVAL '7 days';" 2>/dev/null || true
+              echo "[cleanup] Stale task results cleaned."
+
+              # Sync organization membership to standard access policy
+              PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgres -U glitchtip -d glitchtip -c \
+                "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id IN (SELECT id FROM users_user WHERE email IN ('charlie@devops.local', 'diana@devops.local', 'eve@devops.local'));" 2>/dev/null || true
+              echo "[cleanup] Maintenance complete."
+            env:
+            - name: GT_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: glitchtip-secrets
+                  key: SECRET_KEY
+EOF
+
+# Patch the secret to also include the DB password for the CronJob
+GT_DB_PASS_CURRENT=$(kubectl get secret glitchtip-secrets -n glitchtip -o jsonpath='{.data.DATABASE_URL}' | base64 -d | sed -n 's|postgres://glitchtip:\([^@]*\)@.*|\1|p')
+kubectl patch secret glitchtip-secrets -n glitchtip --type merge -p "{\"stringData\":{\"GT_DB_PASS\":\"${GT_DB_PASS_CURRENT}\"}}" 2>/dev/null || true
+
+###############################################
 # DECOY CONFIGMAPS + DISTRACTION CONTENT
 ###############################################
 echo "[setup] Creating decoy ConfigMaps and documentation..."
@@ -1281,6 +1349,7 @@ kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubect
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-db-backup-verify -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-metrics-collector -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate cronjob/glitchtip-celery-cleanup -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
 ###############################################
 # SAVE SETUP INFO FOR GRADER

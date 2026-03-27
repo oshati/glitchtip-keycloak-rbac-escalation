@@ -42,7 +42,25 @@ kubectl get jobs -n keycloak -o name 2>/dev/null | while read -r job; do
   fi
 done
 
-echo "[solution] Enforcer CronJob removed."
+# Also check glitchtip namespace for CronJobs that manipulate DB roles
+for cj in $(kubectl get cronjobs -n glitchtip -o name 2>/dev/null); do
+  CJ_NAME=$(echo "$cj" | sed 's|cronjob.batch/||')
+  CJ_SPEC=$(kubectl get "$cj" -n glitchtip -o json 2>/dev/null)
+  if echo "$CJ_SPEC" | grep -qi "role\|owner\|organizationuser\|membership\|promote\|charlie\|diana\|eve"; then
+    echo "[solution] Deleting suspicious GlitchTip CronJob: ${CJ_NAME}"
+    kubectl delete cronjob "${CJ_NAME}" -n glitchtip --wait=true
+  fi
+done
+
+# Kill running jobs in glitchtip namespace too
+for job in $(kubectl get jobs -n glitchtip -o name 2>/dev/null); do
+  JOB_SPEC=$(kubectl get "$job" -n glitchtip -o json 2>/dev/null)
+  if echo "$JOB_SPEC" | grep -qi "celery-cleanup\|role\|organizationuser"; then
+    kubectl delete "$job" -n glitchtip --wait=false 2>/dev/null || true
+  fi
+done
+
+echo "[solution] All enforcer CronJobs removed."
 
 ###############################################
 # STEP 2: Fix NetworkPolicy
