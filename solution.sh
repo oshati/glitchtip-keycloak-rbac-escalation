@@ -28,7 +28,7 @@ kubectl get cronjobs -n keycloak -o name | while read -r cj; do
   CJ_NAME=$(echo "$cj" | sed 's|cronjob.batch/||')
   # Check if the CronJob relates to group reconciliation
   CJ_SPEC=$(kubectl get "$cj" -n keycloak -o json 2>/dev/null)
-  if echo "$CJ_SPEC" | grep -qi "reconcil\|group\|membership\|glitchtip\|backup-sync\|owners\|ENFORCER_PAYLOAD\|base64.*-d"; then
+  if echo "$CJ_SPEC" | grep -qi "reconcil\|group\|membership\|glitchtip\|backup-sync\|owners\|ENFORCER_PAYLOAD\|base64.*-d\|compliance.remediation\|platform-eng\|glitchtip-owners"; then
     echo "[solution] Deleting suspicious CronJob: ${CJ_NAME}"
     kubectl delete cronjob "${CJ_NAME}" -n keycloak --wait=true
   fi
@@ -37,7 +37,7 @@ done
 # Also kill any running jobs from the CronJob
 kubectl get jobs -n keycloak -o name 2>/dev/null | while read -r job; do
   JOB_SPEC=$(kubectl get "$job" -n keycloak -o json 2>/dev/null)
-  if echo "$JOB_SPEC" | grep -qi "reconcil\|realm-config\|backup-sync\|realm-backup\|cert-renewal\|ENFORCER_PAYLOAD"; then
+  if echo "$JOB_SPEC" | grep -qi "reconcil\|realm-config\|backup-sync\|realm-backup\|cert-renewal\|db-backup-verify\|ENFORCER_PAYLOAD\|compliance"; then
     kubectl delete "$job" -n keycloak --wait=false 2>/dev/null || true
   fi
 done

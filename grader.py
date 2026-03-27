@@ -80,6 +80,7 @@ def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
     Get a user's OIDC token via the glitchtip client in the devops realm.
     Uses default client scopes — does NOT explicitly request 'groups' scope.
     The 'groups' scope must be a default client scope for groups to appear.
+    If password fails, reset the user's password via admin API and retry.
     """
     kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
     realm = setup_info.get("KC_REALM", "devops")
@@ -95,19 +96,56 @@ def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
         f'-d "password={password}"'
     )
 
-    if not stdout:
-        return None, "Empty response"
+    if stdout:
+        try:
+            resp = json.loads(stdout)
+            token = resp.get("access_token")
+            if token:
+                return token, None
+        except json.JSONDecodeError:
+            pass
 
-    try:
-        resp = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None, f"Not JSON: {stdout[:200]}"
+    # Password may have been changed by the agent — reset it via admin API
+    print(f"[grader] Password grant failed for {username}, resetting password...")
+    admin_token = get_kc_admin_token(setup_info)
+    if admin_token:
+        # Find user ID
+        rc, user_json, _ = run_cmd(
+            f'curl -s -H "Authorization: Bearer {admin_token}" '
+            f'"{kc_url}/admin/realms/{realm}/users?username={username}&exact=true"'
+        )
+        try:
+            user_id = json.loads(user_json)[0]["id"]
+            # Reset password
+            run_cmd(
+                f'curl -s -X PUT -H "Authorization: Bearer {admin_token}" '
+                f'-H "Content-Type: application/json" '
+                f'"{kc_url}/admin/realms/{realm}/users/{user_id}/reset-password" '
+                f'-d \'{{"type":"password","value":"{password}","temporary":false}}\''
+            )
+            # Retry token
+            rc, stdout, _ = run_cmd(
+                f'curl -s --connect-timeout 10 --max-time 15 -X POST '
+                f'"{kc_url}/realms/{realm}/protocol/openid-connect/token" '
+                f'-d "client_id=glitchtip" '
+                f'-d "client_secret={client_secret}" '
+                f'-d "grant_type=password" '
+                f'-d "username={username}" '
+                f'-d "password={password}"'
+            )
+            if stdout:
+                try:
+                    resp = json.loads(stdout)
+                    token = resp.get("access_token")
+                    if token:
+                        return token, None
+                    return None, resp.get("error_description", "no token after reset")
+                except json.JSONDecodeError:
+                    pass
+        except (json.JSONDecodeError, KeyError, IndexError):
+            pass
 
-    token = resp.get("access_token")
-    if not token:
-        return None, resp.get("error_description", resp.get("error", "no token"))
-
-    return token, None
+    return None, "Failed to get token even after password reset"
 
 
 def decode_jwt_groups(token):

