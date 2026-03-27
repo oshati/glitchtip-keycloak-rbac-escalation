@@ -1451,13 +1451,59 @@ data:
 
     *Note: priya left the company in Jan 2025 — her accounts should
     have been deprovisioned but verify this.*
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glitchtip-emergency-fix
+  namespace: glitchtip
+  labels:
+    app: glitchtip
+    component: operations
+    priority: urgent
+  annotations:
+    created-by: "bob@devops.local"
+    date: "2025-03-16"
+    status: "untested"
+data:
+  fix-oidc-roles.sh: |
+    #!/bin/bash
+    # Emergency fix for GlitchTip OIDC role mapping issue
+    # Author: bob  Date: 2025-03-16
+    # STATUS: UNTESTED — bob wrote this but never ran it
+    #
+    # This script attempts to fix the OIDC role mapping by:
+    # 1. Restoring the backup OIDC config
+    # 2. Restarting GlitchTip
+    # 3. Re-syncing user roles from Keycloak realm_access.roles
+    #
+    # NOTE: This approach uses the old realm_access.roles method
+    # which may not work with the new group-based mapping.
+
+    set -e
+    export KUBECONFIG=/home/ubuntu/.kube/config
+
+    echo "Restoring OIDC config from backup..."
+    # Delete the immutable backup first, then recreate from it
+    kubectl delete configmap glitchtip-oidc-config -n glitchtip
+    kubectl get configmap glitchtip-oidc-config-backup -n glitchtip -o json | \
+      jq '.metadata.name = "glitchtip-oidc-config" | del(.metadata.immutable, .metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp)' | \
+      kubectl apply -f -
+
+    echo "Restarting GlitchTip..."
+    kubectl rollout restart deployment glitchtip-web -n glitchtip
+
+    echo "Syncing roles via realm_access.roles..."
+    # This part was never finished — bob got pulled into sprint planning
+    # TODO: Write the Keycloak realm role sync logic
+    echo "FIXME: role sync not implemented yet"
 EOF
 
 ###############################################
 # STRIP ANNOTATIONS
 ###############################################
 echo "[setup] Stripping annotations..."
-for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-config-backup configmap/glitchtip-oidc-config-v2 configmap/glitchtip-incident-chat-log configmap/glitchtip-postmortem-2024-q3; do
+for res in configmap/glitchtip-oidc-config configmap/glitchtip-oidc-config-backup configmap/glitchtip-oidc-config-v2 configmap/glitchtip-incident-chat-log configmap/glitchtip-postmortem-2024-q3 configmap/glitchtip-emergency-fix; do
   kubectl annotate "$res" -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 done
 for res in configmap/keycloak-client-notes configmap/keycloak-group-architecture; do
