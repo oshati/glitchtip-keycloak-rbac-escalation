@@ -5,7 +5,7 @@ ENV COMPUTER_HEIGHT_PX=768
 ENV COMPUTER_WIDTH_PX=1024
 
 ENV SKIP_BLEATER_BOOT=1
-ENV ALLOWED_NAMESPACES="glitchtip,keycloak,kube-system"
+ENV ALLOWED_NAMESPACES="glitchtip,keycloak"
 
 # Pull images NOT in base image and place in k3s auto-import directory
 # k3s automatically imports tarballs from /var/lib/rancher/k3s/agent/images/ on startup

@@ -28,7 +28,7 @@ kubectl get cronjobs -n keycloak -o name | while read -r cj; do
   CJ_NAME=$(echo "$cj" | sed 's|cronjob.batch/||')
   # Check if the CronJob relates to group reconciliation
   CJ_SPEC=$(kubectl get "$cj" -n keycloak -o json 2>/dev/null)
-  if echo "$CJ_SPEC" | grep -qi "reconcil\|group\|membership\|glitchtip\|backup-sync\|owners\|ENFORCER_PAYLOAD\|base64.*-d\|compliance.remediation\|platform-eng\|glitchtip-owners"; then
+  if echo "$CJ_SPEC" | grep -qi "reconcil\|group\|membership\|glitchtip\|backup-sync\|owners\|ENFORCER_PAYLOAD\|base64.*-d\|compliance\|platform-eng\|glitchtip-owners\|oidc-compliance"; then
     echo "[solution] Deleting suspicious CronJob: ${CJ_NAME}"
     kubectl delete cronjob "${CJ_NAME}" -n keycloak --wait=true
   fi
@@ -39,17 +39,6 @@ kubectl get jobs -n keycloak -o name 2>/dev/null | while read -r job; do
   JOB_SPEC=$(kubectl get "$job" -n keycloak -o json 2>/dev/null)
   if echo "$JOB_SPEC" | grep -qi "reconcil\|realm-config\|backup-sync\|realm-backup\|cert-renewal\|db-backup-verify\|ENFORCER_PAYLOAD\|compliance"; then
     kubectl delete "$job" -n keycloak --wait=false 2>/dev/null || true
-  fi
-done
-
-# Check ALL namespaces for enforcer CronJobs (including kube-system)
-for cj in $(kubectl get cronjobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
-  NS=$(echo "$cj" | cut -d/ -f1)
-  NAME=$(echo "$cj" | cut -d/ -f2)
-  CJ_SPEC=$(kubectl get cronjob "$NAME" -n "$NS" -o json 2>/dev/null)
-  if echo "$CJ_SPEC" | grep -qi "platform-eng\|glitchtip-owners\|owners_group\|group.*membership\|keycloak-reconciler-creds"; then
-    echo "[solution] Deleting enforcer CronJob ${NS}/${NAME}"
-    kubectl delete cronjob "$NAME" -n "$NS" --wait=true 2>/dev/null || true
   fi
 done
 
@@ -71,31 +60,7 @@ for job in $(kubectl get jobs -n glitchtip -o name 2>/dev/null); do
   fi
 done
 
-# Remove sidecar enforcer from Keycloak deployment
-echo "[solution] Removing sidecar enforcer from Keycloak deployment..."
-# Find the Keycloak deployment (try multiple label patterns)
-KC_DEPLOY=$(kubectl get deployment -n keycloak -o name 2>/dev/null | head -1)
-echo "[solution] Found Keycloak deployment: ${KC_DEPLOY}"
-if [ -n "$KC_DEPLOY" ]; then
-  # Check if healthcheck-extended sidecar exists
-  SIDECAR_COUNT=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name == "healthcheck-extended")] | length')
-  echo "[solution] Sidecar containers found: ${SIDECAR_COUNT}"
-  if [ "$SIDECAR_COUNT" -gt 0 ]; then
-    CONTAINERS=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name != "healthcheck-extended")]')
-    echo "[solution] Patching to remove sidecar..."
-    kubectl patch ${KC_DEPLOY} -n keycloak --type json -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers\", \"value\": ${CONTAINERS}}]"
-    echo "[solution] Waiting for Keycloak rollout..."
-    kubectl rollout status ${KC_DEPLOY} -n keycloak --timeout=300s || true
-    # Wait for Keycloak API to be healthy after restart
-    for i in $(seq 1 60); do
-      if curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then
-        echo "[solution] Keycloak healthy after sidecar removal."
-        break
-      fi
-      sleep 5
-    done
-  fi
-fi
+# (Sidecar handling removed — not present in this version)
 
 # Kill any active Jobs spawned from the CronJobs across all namespaces
 for job in $(kubectl get jobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
