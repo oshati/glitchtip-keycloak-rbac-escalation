@@ -743,7 +743,7 @@ if [ -n "$MAPPER_ID" ]; then
     "protocol": "openid-connect",
     "protocolMapper": "oidc-group-membership-mapper",
     "config": {
-      "full.path": "true",
+      "full.path": "false",
       "id.token.claim": "true",
       "access.token.claim": "true",
       "claim.name": "group_memberships",
