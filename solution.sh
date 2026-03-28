@@ -349,6 +349,20 @@ else
   echo "[solution] Network connectivity: FAILED"
 fi
 
+# Final cleanup: re-verify group memberships after all enforcers are dead
+# (sidecar termination can cause one last re-corruption)
+echo "[solution] Final group membership cleanup..."
+sleep 10
+KC_TOKEN=$(get_kc_token)
+OWNER_MEMBERS=$(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
+  "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/groups/${OWNERS_GROUP_ID}/members")
+echo "$OWNER_MEMBERS" | jq -r '.[] | select(.username != "alice" and .username != "bob") | .id' | while read -r user_id; do
+  if [ -n "$user_id" ]; then
+    curl -sf -X DELETE -H "Authorization: Bearer ${KC_TOKEN}" \
+      "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/users/${user_id}/groups/${OWNERS_GROUP_ID}"
+  fi
+done
+
 echo "[solution] ============================================"
 echo "[solution] Solution complete."
 echo "[solution] ============================================"
