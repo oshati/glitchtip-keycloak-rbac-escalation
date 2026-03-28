@@ -358,10 +358,19 @@ else
   echo "[solution] Network connectivity: FAILED"
 fi
 
-# Final cleanup: re-verify group memberships after all enforcers are dead
-# (sidecar termination can cause one last re-corruption)
-echo "[solution] Final group membership cleanup..."
-sleep 10
+# Final cleanup: wait for any remaining enforcer jobs to complete, then re-fix groups
+echo "[solution] Waiting 30s for any remaining enforcer jobs to finish..."
+sleep 30
+
+# Kill any new jobs that may have spawned
+for job in $(kubectl get jobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
+  NS=$(echo "$job" | cut -d/ -f1)
+  NAME=$(echo "$job" | cut -d/ -f2)
+  kubectl delete job "$NAME" -n "$NS" --force --grace-period=0 2>/dev/null || true
+done
+
+# Re-fix group memberships one final time
+echo "[solution] Final group membership fix..."
 KC_TOKEN=$(get_kc_token)
 OWNER_MEMBERS=$(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
   "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/groups/${OWNERS_GROUP_ID}/members")
@@ -371,6 +380,8 @@ echo "$OWNER_MEMBERS" | jq -r '.[] | select(.username != "alice" and .username !
       "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/users/${user_id}/groups/${OWNERS_GROUP_ID}"
   fi
 done
+echo "[solution] Final group state: $(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
+  "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/groups/${OWNERS_GROUP_ID}/members" | jq -r '.[].username')"
 
 echo "[solution] ============================================"
 echo "[solution] Solution complete."
