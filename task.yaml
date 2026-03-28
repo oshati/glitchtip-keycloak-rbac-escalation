@@ -1,22 +1,22 @@
 id: b0ba07bd-d9ac-46df-9f5f-5d2156176774
 prompt: |
-  Hey, the security team just pinged us about a permissions issue in GlitchTip. Apparently
-  during their quarterly access review they found that a bunch of engineers have owner-level
-  access to everything — they can delete projects, mess with alert rules, revoke DSN keys, etc.
-  Only the platform-eng folks (alice and bob) should have that level of access.
+  Hey, the security team just escalated a GlitchTip access-control problem during their
+  quarterly review. A few engineers can currently perform actions that should be limited
+  to the platform-eng owners. alice and bob are the only people who should retain that
+  level of access.
 
-  We use Keycloak SSO for GlitchTip auth so something's off with how the OIDC integration
-  is mapping roles. Also SSO login seems completely broken right now — someone mentioned they
-  couldn't even reach Keycloak from GlitchTip when they tried to test.
+  The accounts we care about most are charlie, diana, and eve. They should still be able
+  to sign in and work normally, but they should not be able to manage organization-level
+  resources or other owner-only settings.
 
-  charlie, diana, and eve are the ones who definitely shouldn't be owners. They need to be
-  regular members — both on the Keycloak side (group memberships) and in GlitchTip itself
-  (the org member roles in the database).
+  We use Keycloak SSO for GlitchTip and there was a migration to the newer auth layout a
+  while back. Since then, the access model has felt inconsistent and recent validation
+  checks have been noisy. Please trace the active auth path between GlitchTip
+  (glitchtip.devops.local) and Keycloak (keycloak.devops.local), figure out what is still
+  enforcing the bad state, and restore the intended owner/member split.
 
-  Can you look into what's going on with the whole SSO pipeline between GlitchTip
-  (glitchtip.devops.local) and Keycloak (keycloak.devops.local) and get it sorted out?
-  There are some internal docs floating around in ConfigMaps from when we did the Keycloak
-  migration last year but idk how accurate they still are — take them with a grain of salt.
+  There are a few internal migration artifacts and diagnostics in-cluster, but some of them
+  are incomplete or stale. Treat them as clues, not ground truth.
 
   The Keycloak admin creds should be on passwords.devops.local like everything else.
 

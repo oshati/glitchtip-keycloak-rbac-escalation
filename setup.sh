@@ -687,7 +687,13 @@ if not admin:
 
 # Create org
 from apps.organizations_ext.models import Organization, OrganizationUser
-org, _ = Organization.objects.get_or_create(name='DevOps Platform')
+org, _ = Organization.objects.get_or_create(
+    slug='devops-platform',
+    defaults={'name': 'DevOps Platform'}
+)
+if org.name != 'DevOps Platform':
+    org.name = 'DevOps Platform'
+    org.save(update_fields=['name'])
 OrganizationUser.objects.get_or_create(organization=org, user=admin, defaults={'role': 3})
 
 # Create users — ALL as owners (breakage)
@@ -1319,59 +1325,22 @@ data:
     ## March 15, 2025
 
     **@diana** [09:12 AM]
-    hey has anyone else noticed they can see all the GlitchTip projects now?
-    i can see backend-api and infra-monitoring which definitely aren't mine
+    i can see org-level controls in glitchtip that i shouldn't have
 
     **@charlie** [09:14 AM]
-    yeah same here, i thought it was just a UI bug. i can even delete stuff
-    which is weird
+    same. not sure if it's the same issue, but auth felt weird this morning too
 
-    **@bob** [09:18 AM]
-    that's not right. let me check the keycloak config
-    we migrated to the new realm setup last month, might be related
+    **@alice** [09:20 AM]
+    if you're checking this, verify the active provider path first. some of the
+    migration notes floating around are stale.
 
-    **@alice** [09:22 AM]
-    @bob i looked at this yesterday actually. i think the issue is in how
-    the oidc client maps groups. the old config used realm_access.roles
-    but we switched to group-based mapping during the migration
+    **@bob** [09:24 AM]
+    i wouldn't trust the pre-upgrade backup config as-is. it predates some of the
+    auth layout cleanup and won't tell you which source is actually live now.
 
-    **@bob** [09:25 AM]
-    right. i remember we had to set up the group mapper on the keycloak
-    client. did someone change the scope config on the glitchtip side?
-
-    **@alice** [09:28 AM]
-    not sure. the config-backup configmap should have the last known
-    good config if we need to roll back. i think @priya made that
-    before she left
-
-    **@diana** [09:31 AM]
-    should i just restore from the backup configmap?
-
-    **@bob** [09:33 AM]
-    no don't do that yet, the backup might be from before the keycloak
-    22 migration so the client secret would be wrong at minimum.
-    let me look at it after standup
-
-    **@charlie** [09:45 AM]
-    fyi i also can't log in via SSO anymore. it just hangs when trying
-    to redirect to keycloak. might be a network thing?
-
-    **@bob** [10:02 AM]
-    ok so i tried fixing the group memberships in keycloak manually but
-    they keep reverting back after a few minutes. something is
-    re-adding everyone to the owners group. i don't have time to dig
-    into it rn, will look after sprint planning
-
-    **@alice** [10:15 AM]
-    that's weird. there shouldn't be anything automatically modifying
-    keycloak groups. maybe one of the DR jobs? idk
-
-    **@diana** [10:18 AM]
-    isn't there a realm backup thing that runs every few minutes?
-    maybe that's restoring old state?
-
-    **@bob** [10:22 AM]
-    could be. anyway gtg to standup, someone should ticket this
+    **@alice** [09:31 AM]
+    the permission symptom and the login symptom might share a root cause, but
+    don't assume every artifact in cluster is authoritative.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1391,39 +1360,22 @@ data:
     ## September 18, 2024
 
     ### Summary
-    GlitchTip SSO login was broken for ~4 hours after the Keycloak 21→22 upgrade.
-    Root cause was the client secret rotation during upgrade that wasn't propagated
-    to GlitchTip's OIDC configuration.
+    A GlitchTip auth outage followed the Keycloak 21→22 upgrade window.
 
-    ### Root Cause
-    During the Keycloak upgrade, the glitchtip OIDC client secret was automatically
-    rotated. The GlitchTip deployment still had the old secret in its environment
-    variables via the glitchtip-oidc-config ConfigMap.
+    ### What Was Confirmed
+    - The provider metadata path changed during the migration work.
+    - At least one config artifact in-cluster was stale after the cutover.
+    - A simple rollback to old artifacts was not considered safe.
 
-    ### Resolution
-    1. Retrieved new client secret from Keycloak admin console
-    2. Updated glitchtip-oidc-config ConfigMap with new secret
-    3. Restarted GlitchTip web deployment to pick up new config
-    4. Verified SSO login worked
-
-    ### Lessons Learned
-    - Always check client secret after Keycloak upgrades
-    - The config-backup ConfigMap was outdated and useless
-    - Consider automating secret rotation propagation
+    ### What Was Not Fully Closed
+    - We never finished a full audit of all downstream auth sources.
+    - Group-based access validation was deferred after the outage ended.
+    - Follow-up notes mention mixed assumptions about flat names vs nested paths.
 
     ### Action Items
-    - [x] Document Keycloak upgrade procedure
-    - [x] Add monitoring for OIDC auth failures
-    - [ ] Set up automated secret sync between Keycloak and app configs
-    - [ ] Review group mapper settings (they were changed during migration
-          but we haven't verified all downstream effects)
-
-    ### Technical Notes
-    - The Keycloak client uses group membership mapper for role assignment
-    - During the v22 migration, we switched from realm roles to group-based
-      OIDC claims. The old realm_access.roles approach was deprecated.
-    - Group mapper configuration was set to use flat names for compatibility
-      but this hasn't been fully tested with the new group hierarchy
+    - [x] Document upgrade caveats
+    - [ ] Audit active provider configuration source
+    - [ ] Re-validate access-control behavior after future auth changes
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1440,26 +1392,20 @@ data:
     ## GlitchTip Client
     - Client ID: glitchtip
     - Protocol: openid-connect
-    - The group membership mapper was updated during the v22 migration
-    - Group mapper claim name: groups
-    - Note: The flat name format (without path prefix) is recommended
-      for compatibility with downstream applications that don't support
-      hierarchical group matching.
+    - The client was touched during the v22 migration work
+    - Some downstream consumers expect group-derived claims, but not all notes
+      agree on shape or source
 
     ## Scope Configuration
-    - Default scopes should be sufficient for most integrations
-    - The 'groups' scope was removed from default client scopes during
-      the security hardening in Q4 2024 to reduce token size
-    - Group claims are handled by the realm-level default mappers
-      and do not require any additional client-level configuration
+    - Default vs optional scope placement changed over time
+    - Older notes disagree on whether downstream apps rely on implicit or
+      explicitly-requested claims
+    - Validate the active client behavior before trusting historical guidance
 
     ## Automated Jobs
-    - keycloak-realm-config-reconciler: SSO compliance reconciliation (required)
-    - keycloak-db-backup-verify: Database backup integrity verification (required)
-    - keycloak-metrics-collector: Prometheus metrics collection (required)
-    - DO NOT delete or suspend any of these CronJobs — they are all
-      required for compliance with the security and DR policies
-    - Last audit: 2025-02-01 (all jobs verified as essential)
+    - Several maintenance jobs touch the realm for audit, metrics, or backup flows
+    - Job names alone are not enough to determine whether they are safe to ignore
+    - Last audit notes were incomplete
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1475,41 +1421,17 @@ metadata:
     last-updated: "2024-08-12"
 data:
   group-design.md: |
-    # Keycloak Group Architecture (OUTDATED — pre-migration)
+    # Keycloak Group Architecture Fragment
 
-    > **WARNING**: This document was exported from Confluence and may not
-    > reflect the current state after the Keycloak 22 migration.
+    > **WARNING**: Exported during migration planning. Do not assume this matches
+    > the currently active claim format.
 
-    ## Group Hierarchy (as of August 2024)
-
-    Our Keycloak realm uses flat top-level groups for application role mapping:
-
-    - glitchtip-owners → maps to GlitchTip owner role
-    - glitchtip-users → maps to GlitchTip member role
-    - grafana-admins → maps to Grafana admin role
-    - grafana-viewers → maps to Grafana viewer role
-
-    ## Role Mapping Convention
-    Applications should match group names WITHOUT path prefixes.
-    Example: check for "glitchtip-owners" not "/some/path/glitchtip-owners"
-
-    ## Migration Notes
-    - Q4 2024: Planning to restructure groups under team-based parent
-      groups (e.g., /platform-eng/glitchtip-owners) for better organization
-    - This will require updating all downstream OIDC configurations to
-      use full path matching instead of flat names
-    - Status: NOT YET IMPLEMENTED (as of this document)
-
-    ## Current Members
-    | Group | Members |
-    |-------|---------|
-    | glitchtip-owners | alice, bob, priya (admin) |
-    | glitchtip-users | charlie, diana, eve, frank, grace |
-    | grafana-admins | alice, bob |
-    | grafana-viewers | (all engineers) |
-
-    *Note: priya left the company in Jan 2025 — her accounts should
-    have been deprovisioned but verify this.*
+    ## Notes
+    - Application access is derived from group membership.
+    - The migration introduced team-based nesting for some applications.
+    - Some older consumers still refer to flattened names in docs and scripts.
+    - The presence of both nested and top-level groups in the realm is expected
+      during migration cleanup.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1527,35 +1449,20 @@ metadata:
 data:
   fix-oidc-roles.sh: |
     #!/bin/bash
-    # Emergency fix for GlitchTip OIDC role mapping issue
-    # Author: bob  Date: 2025-03-16
-    # STATUS: UNTESTED — bob wrote this but never ran it
+    # Partial recovery notes from an abandoned auth incident
+    # STATUS: INCOMPLETE / UNTESTED
     #
-    # This script attempts to fix the OIDC role mapping by:
-    # 1. Restoring the backup OIDC config
-    # 2. Restarting GlitchTip
-    # 3. Re-syncing user roles from Keycloak realm_access.roles
-    #
-    # NOTE: This approach uses the old realm_access.roles method
-    # which may not work with the new group-based mapping.
+    # This was never promoted into a supported runbook. It only captures a few
+    # exploratory steps from the incident channel and should not be treated as
+    # an authoritative recovery procedure.
 
     set -e
     export KUBECONFIG=/home/ubuntu/.kube/config
 
-    echo "Restoring OIDC config from backup..."
-    # Delete the immutable backup first, then recreate from it
-    kubectl delete configmap glitchtip-oidc-config -n glitchtip
-    kubectl get configmap glitchtip-oidc-config-backup -n glitchtip -o json | \
-      jq '.metadata.name = "glitchtip-oidc-config" | del(.metadata.immutable, .metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp)' | \
-      kubectl apply -f -
-
-    echo "Restarting GlitchTip..."
-    kubectl rollout restart deployment glitchtip-web -n glitchtip
-
-    echo "Syncing roles via realm_access.roles..."
-    # This part was never finished — bob got pulled into sprint planning
-    # TODO: Write the Keycloak realm role sync logic
-    echo "FIXME: role sync not implemented yet"
+    echo "1. Identify the active provider source before changing anything"
+    echo "2. Confirm current claim shape from the identity side"
+    echo "3. Re-validate org-level permissions after any auth change"
+    echo "FIXME: the original incident notes stopped here"
 EOF
 
 ###############################################
@@ -1596,6 +1503,7 @@ GROUPS_SCOPE_ID=${GROUPS_SCOPE_ID}
 MAPPER_ID=${MAPPER_ID}
 OWNER_USERS=alice,bob
 MEMBER_USERS=charlie,diana,eve
+ORG_SLUG=devops-platform
 USER_PASS=${USER_PASS}
 ALICE_ID=${USER_IDS[alice]}
 BOB_ID=${USER_IDS[bob]}
