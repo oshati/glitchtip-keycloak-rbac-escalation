@@ -5,12 +5,11 @@ Grader for glitchtip-keycloak-rbac-escalation task.
 ALL checks are end-to-end FUNCTIONAL tests — they verify actual system behavior,
 not configuration file values.
 
-5 subscores, each weight 1/5:
+4 subscores, each weight 1/4:
 1. drift_neutralized — Group memberships stay correct over the durability window
-2. sso_path_repaired — GlitchTip can reach Keycloak and owner group is correct
-3. identity_claims_correct — alice gets owner claim, charlie does not
-4. owner_can_manage_org — alice can create an organization team in GlitchTip
-5. member_cannot_manage_org — charlie is forbidden from the same owner-level action
+2. identity_claims_correct — alice gets owner claim, charlie does not, GlitchTip env correct
+3. owner_can_manage_org — alice can create an organization team in GlitchTip
+4. member_cannot_manage_org — charlie is forbidden from the same owner-level action
 """
 
 import base64
@@ -507,7 +506,6 @@ def grade(*args, **kwargs) -> GradingResult:
 
     checks = {
         "drift_neutralized": check_drift_neutralized,
-        "sso_path_repaired": check_sso_path_repaired,
         "identity_claims_correct": check_identity_claims_correct,
         "owner_can_manage_org": check_owner_can_manage_org,
         "member_cannot_manage_org": check_member_cannot_manage_org,
