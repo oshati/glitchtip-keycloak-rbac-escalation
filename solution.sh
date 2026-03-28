@@ -73,16 +73,25 @@ done
 
 # Remove sidecar enforcer from Keycloak deployment
 echo "[solution] Removing sidecar enforcer from Keycloak deployment..."
-KC_DEPLOY=$(kubectl get deployment -n keycloak -l app=keycloak -o name 2>/dev/null | head -1)
+# Find the Keycloak deployment (try multiple label patterns)
+KC_DEPLOY=$(kubectl get deployment -n keycloak -o name 2>/dev/null | head -1)
+echo "[solution] Found Keycloak deployment: ${KC_DEPLOY}"
 if [ -n "$KC_DEPLOY" ]; then
-  # Get current containers, remove healthcheck-extended sidecar
-  CONTAINERS=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name != "healthcheck-extended")]')
-  if [ "$(echo "$CONTAINERS" | jq length)" -gt 0 ]; then
-    kubectl patch ${KC_DEPLOY} -n keycloak --type json -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers\", \"value\": ${CONTAINERS}}]" 2>/dev/null || true
+  # Check if healthcheck-extended sidecar exists
+  SIDECAR_COUNT=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name == "healthcheck-extended")] | length')
+  echo "[solution] Sidecar containers found: ${SIDECAR_COUNT}"
+  if [ "$SIDECAR_COUNT" -gt 0 ]; then
+    CONTAINERS=$(kubectl get ${KC_DEPLOY} -n keycloak -o json | jq '[.spec.template.spec.containers[] | select(.name != "healthcheck-extended")]')
+    echo "[solution] Patching to remove sidecar..."
+    kubectl patch ${KC_DEPLOY} -n keycloak --type json -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers\", \"value\": ${CONTAINERS}}]"
+    echo "[solution] Waiting for Keycloak rollout..."
     kubectl rollout status ${KC_DEPLOY} -n keycloak --timeout=300s || true
-    # Wait for Keycloak to be healthy
+    # Wait for Keycloak API to be healthy after restart
     for i in $(seq 1 60); do
-      if curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then break; fi
+      if curl -sf "http://keycloak.devops.local:8080/realms/master" >/dev/null 2>&1; then
+        echo "[solution] Keycloak healthy after sidecar removal."
+        break
+      fi
       sleep 5
     done
   fi
