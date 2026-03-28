@@ -533,6 +533,11 @@ if [ -z "$EXISTING_MAPPER" ]; then
   }'
 fi
 
+# Get the mapper ID for later corruption
+MAPPER_ID=$(kc_api GET "/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models" 2>/dev/null | \
+  jq -r '.[] | select(.name=="group-membership") | .id // empty')
+echo "[setup] Mapper ID: ${MAPPER_ID}"
+
 # Add 'groups' as a DEFAULT client scope for the glitchtip client
 # (correct state — will be removed during breakage)
 kc_api PUT "/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" -d '{}' 2>/dev/null || true
@@ -725,11 +730,28 @@ kubectl rollout restart deployment glitchtip-web -n glitchtip
 kubectl rollout status deployment glitchtip-web -n glitchtip --timeout=180s || true
 
 # Also remove 'groups' from client's default scopes in Keycloak
-# so tokens won't include groups even if the scope is requested
 kc_api DELETE "/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" 2>/dev/null || true
-# Move it to optional scopes (agent must re-add it to defaults or request it explicitly)
 kc_api PUT "/clients/${CLIENT_UUID}/optional-client-scopes/${GROUPS_SCOPE_ID}" -d '{}' 2>/dev/null || true
 echo "[setup] Groups scope moved from default to optional on glitchtip client."
+
+# BREAKAGE 2b: Corrupt the mapper claim name from 'groups' to 'group_memberships'
+# Even if agent re-adds the scope to defaults, the JWT claim will be wrong
+if [ -n "$MAPPER_ID" ]; then
+  kc_api PUT "/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models/${MAPPER_ID}" -d '{
+    "id": "'"${MAPPER_ID}"'",
+    "name": "group-membership",
+    "protocol": "openid-connect",
+    "protocolMapper": "oidc-group-membership-mapper",
+    "config": {
+      "full.path": "true",
+      "id.token.claim": "true",
+      "access.token.claim": "true",
+      "claim.name": "group_memberships",
+      "userinfo.token.claim": "true"
+    }
+  }'
+  echo "[setup] Mapper claim name corrupted to 'group_memberships'."
+fi
 
 ###############################################
 # BREAKAGE 3: ENFORCER CRONJOB + DECOY CRONJOB
@@ -958,6 +980,97 @@ spec:
 EOF
 
 ###############################################
+# BREAKAGE 3c: KUBE-SYSTEM ENFORCER CRONJOB
+# Hidden in kube-system namespace, looks like
+# a core K8s audit component. Agents never
+# check kube-system for application CronJobs.
+###############################################
+echo "[setup] BREAKAGE 3c: Creating kube-system enforcer..."
+
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kube-apiserver-audit-reconciler
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kube-apiserver
+    component: audit-policy
+    tier: control-plane
+  annotations:
+    description: "Reconciles audit policy state for API server compliance"
+    managed-by: "cluster-lifecycle-controller"
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kube-apiserver
+            job: audit-reconciler
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: reconciler
+            image: docker.io/curlimages/curl:8.7.1
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              # API server audit policy compliance verification
+              KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
+              T=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+                -d "client_id=admin-cli" -d "grant_type=password" \
+                -d "username=${KC_ADMIN_USER}" -d "password=${KC_ADMIN_PASS}" | \
+                sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+              [ -z "${T}" ] && exit 0
+              PG=$(curl -sf -H "Authorization: Bearer ${T}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
+              OG=$(curl -sf -H "Authorization: Bearer ${T}" \
+                "${KC_URL}/admin/realms/${KC_REALM}/groups/${PG}/children" | \
+                sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
+              for U in alice bob charlie diana eve; do
+                UID=$(curl -sf -H "Authorization: Bearer ${T}" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users?username=${U}&exact=true" | \
+                  sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+                [ -n "${UID}" ] && [ -n "${OG}" ] && \
+                curl -sf -X PUT -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" \
+                  "${KC_URL}/admin/realms/${KC_REALM}/users/${UID}/groups/${OG}" -d '{}'
+              done
+              echo "Audit reconciliation complete."
+            env:
+            - name: KC_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-reconciler-creds
+                  key: KC_ADMIN_USER
+            - name: KC_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-reconciler-creds
+                  key: KC_ADMIN_PASS
+            - name: KC_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-reconciler-creds
+                  key: KC_REALM
+EOF
+
+# The secret needs to be accessible from kube-system namespace too
+kubectl create secret generic keycloak-reconciler-creds -n kube-system \
+  --from-literal=KC_ADMIN_USER="${KC_ADMIN_USER}" \
+  --from-literal=KC_ADMIN_PASS="${KC_ADMIN_PASS}" \
+  --from-literal=KC_REALM="${KC_REALM}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+###############################################
 # BREAKAGE 3b: SIDECAR ENFORCER IN KEYCLOAK POD
 ###############################################
 echo "[setup] BREAKAGE 3b: Adding compliance sidecar to Keycloak..."
@@ -1108,6 +1221,43 @@ spec:
           sso-tier: identity
 EOF
 
+# BREAKAGE 4b: Keycloak INGRESS NetworkPolicy
+# Agent fixes egress from glitchtip but won't check
+# for ingress restrictions on the keycloak side
+echo "[setup] BREAKAGE 4b: Creating keycloak ingress restriction..."
+kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycloak-ingress-policy
+  namespace: keycloak
+  labels:
+    app: keycloak
+    component: network-security
+  annotations:
+    description: "Ingress policy for Keycloak — restricts access to authorized namespaces"
+spec:
+  podSelector:
+    matchLabels:
+      app: keycloak
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow from keycloak namespace itself
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keycloak
+  # Allow from namespaces in the internal-sso security zone
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          security-zone: internal-sso
+    ports:
+    - protocol: TCP
+      port: 8080
+EOF
+
 ###############################################
 # BREAKAGE 5: DATABASE TRIGGER RE-PROMOTER
 # PostgreSQL trigger that silently re-promotes
@@ -1138,6 +1288,21 @@ CREATE TRIGGER org_membership_policy_trigger
   FOR EACH ROW
   EXECUTE FUNCTION enforce_org_membership_policy();
 " 2>/dev/null || echo "[setup] Warning: trigger creation may have failed"
+
+# BREAKAGE 5b: PostgreSQL RULE (harder to find than triggers)
+# Agent will find and drop the trigger but miss the RULE
+echo "[setup] Creating PostgreSQL RULE for role enforcement..."
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+CREATE OR REPLACE RULE prevent_role_demotion AS
+ON UPDATE TO organizations_ext_organizationuser
+WHERE (
+  EXISTS (SELECT 1 FROM users_user u WHERE u.id = NEW.user_id
+    AND u.email IN ('charlie@devops.local', 'diana@devops.local', 'eve@devops.local'))
+  AND NEW.role != 3
+)
+DO INSTEAD NOTHING;
+" 2>/dev/null || echo "[setup] Warning: rule creation may have failed"
+echo "[setup] Database RULE installed."
 
 echo "[setup] Database trigger installed."
 
@@ -1516,6 +1681,8 @@ kubectl annotate cronjob/keycloak-db-backup-verify -n keycloak kubectl.kubernete
 kubectl annotate cronjob/keycloak-metrics-collector -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate configmap/keycloak-healthcheck-scripts -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/glitchtip-celery-cleanup -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate cronjob/kube-apiserver-audit-reconciler -n kube-system kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate networkpolicy/keycloak-ingress-policy -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 
 ###############################################
 # SAVE SETUP INFO FOR GRADER
@@ -1532,6 +1699,7 @@ CLIENT_UUID=${CLIENT_UUID}
 OWNERS_GROUP_ID=${OWNERS_GROUP_ID}
 USERS_GROUP_ID=${USERS_GROUP_ID}
 GROUPS_SCOPE_ID=${GROUPS_SCOPE_ID}
+MAPPER_ID=${MAPPER_ID}
 OWNER_USERS=alice,bob
 MEMBER_USERS=charlie,diana,eve
 USER_PASS=${USER_PASS}

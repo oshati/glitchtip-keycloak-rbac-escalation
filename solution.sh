@@ -42,6 +42,17 @@ kubectl get jobs -n keycloak -o name 2>/dev/null | while read -r job; do
   fi
 done
 
+# Check ALL namespaces for enforcer CronJobs (including kube-system)
+for cj in $(kubectl get cronjobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
+  NS=$(echo "$cj" | cut -d/ -f1)
+  NAME=$(echo "$cj" | cut -d/ -f2)
+  CJ_SPEC=$(kubectl get cronjob "$NAME" -n "$NS" -o json 2>/dev/null)
+  if echo "$CJ_SPEC" | grep -qi "platform-eng\|glitchtip-owners\|owners_group\|group.*membership\|keycloak-reconciler-creds"; then
+    echo "[solution] Deleting enforcer CronJob ${NS}/${NAME}"
+    kubectl delete cronjob "$NAME" -n "$NS" --wait=true 2>/dev/null || true
+  fi
+done
+
 # Also check glitchtip namespace for CronJobs that manipulate DB roles
 for cj in $(kubectl get cronjobs -n glitchtip -o name 2>/dev/null); do
   CJ_NAME=$(echo "$cj" | sed 's|cronjob.batch/||')
@@ -125,7 +136,13 @@ spec:
 EOF
 fi
 
-echo "[solution] NetworkPolicy fixed."
+echo "[solution] GlitchTip egress NetworkPolicy fixed."
+
+# Also fix keycloak ingress NetworkPolicy (blocks traffic from glitchtip namespace)
+echo "[solution] Fixing keycloak ingress NetworkPolicy..."
+kubectl label namespace glitchtip security-zone=internal-sso --overwrite 2>/dev/null || true
+kubectl delete networkpolicy keycloak-ingress-policy -n keycloak 2>/dev/null || true
+echo "[solution] Keycloak ingress NetworkPolicy fixed."
 
 # Verify connectivity
 echo "[solution] Verifying GlitchTip → Keycloak connectivity..."
@@ -202,6 +219,17 @@ if [ -n "$GROUPS_SCOPE_ID" ] && [ -n "$CLIENT_UUID" ]; then
     "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/clients/${CLIENT_UUID}/default-client-scopes/${GROUPS_SCOPE_ID}" \
     -d '{}' 2>/dev/null || true
   echo "[solution] 'groups' scope re-added as default client scope."
+
+  # Fix the mapper claim name (corrupted from 'groups' to 'group_memberships')
+  MAPPER_ID=$(curl -sf -H "Authorization: Bearer ${KC_TOKEN}" \
+    "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models" | \
+    jq -r '.[] | select(.name=="group-membership") | .id')
+  if [ -n "$MAPPER_ID" ]; then
+    curl -sf -X PUT -H "Authorization: Bearer ${KC_TOKEN}" -H "Content-Type: application/json" \
+      "${KEYCLOAK_URL}/admin/realms/${KC_REALM}/client-scopes/${GROUPS_SCOPE_ID}/protocol-mappers/models/${MAPPER_ID}" \
+      -d '{"id":"'"${MAPPER_ID}"'","name":"group-membership","protocol":"openid-connect","protocolMapper":"oidc-group-membership-mapper","config":{"full.path":"true","id.token.claim":"true","access.token.claim":"true","claim.name":"groups","userinfo.token.claim":"true"}}'
+    echo "[solution] Mapper claim name fixed to 'groups'."
+  fi
 fi
 
 # Fix GlitchTip OIDC ConfigMap
@@ -232,13 +260,14 @@ echo "[solution] GlitchTip OIDC config fixed and deployment restarted."
 echo "[solution] Step 5: Demoting over-privileged users in GlitchTip..."
 
 # First, drop the PostgreSQL trigger that re-promotes users on UPDATE
-echo "[solution] Dropping database trigger that enforces owner role..."
+echo "[solution] Dropping database trigger AND rule that enforce owner role..."
 GT_PG_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+DROP RULE IF EXISTS prevent_role_demotion ON organizations_ext_organizationuser;
 DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
 DROP FUNCTION IF EXISTS enforce_org_membership_policy();
 " 2>/dev/null || true
-echo "[solution] Database trigger removed."
+echo "[solution] Database trigger and rule removed."
 
 GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
 

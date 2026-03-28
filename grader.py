@@ -405,8 +405,8 @@ def grade(*args, **kwargs) -> GradingResult:
 
     # Durability window — if the enforcer is still active, it will re-corrupt
     # NOTE: We do NOT un-suspend CronJobs — suspension is a valid fix
-    print("[grader] Waiting 150s durability window...")
-    time.sleep(150)
+    print("[grader] Waiting 180s durability window...")
+    time.sleep(180)
 
     checks = {
         "enforcer_neutralized": check_enforcer_neutralized,
