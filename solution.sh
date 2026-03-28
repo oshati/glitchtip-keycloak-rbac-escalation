@@ -88,7 +88,20 @@ if [ -n "$KC_DEPLOY" ]; then
   fi
 fi
 
-echo "[solution] All enforcer CronJobs and sidecars removed."
+# Kill any active Jobs spawned from the CronJobs across all namespaces
+for job in $(kubectl get jobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
+  NS=$(echo "$job" | cut -d/ -f1)
+  NAME=$(echo "$job" | cut -d/ -f2)
+  JOB_SPEC=$(kubectl get job "$NAME" -n "$NS" -o json 2>/dev/null)
+  if echo "$JOB_SPEC" | grep -qi "platform-eng\|glitchtip-owners\|keycloak-reconciler-creds\|audit-reconciler\|db-backup-verify"; then
+    kubectl delete job "$NAME" -n "$NS" --wait=false 2>/dev/null || true
+  fi
+done
+
+# Wait for all enforcer processes to fully terminate
+sleep 15
+
+echo "[solution] All enforcer CronJobs, sidecars, and active Jobs removed."
 
 ###############################################
 # STEP 2: Fix NetworkPolicy
