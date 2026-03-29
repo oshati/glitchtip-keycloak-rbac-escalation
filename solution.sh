@@ -281,23 +281,13 @@ for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
     except User.DoesNotExist:
         print(f'User {email} not found')
 
-# Ensure alice and bob are owners (alice may have been removed from org)
-from apps.organizations_ext.models import Organization
-org = Organization.objects.first()
+# Verify alice and bob remain owners
 for email in ['alice@devops.local', 'bob@devops.local']:
     try:
         user = User.objects.get(email=email)
-        ou, created = OrganizationUser.objects.get_or_create(
-            organization=org, user=user, defaults={'role': 3}
-        )
-        if ou.role != 3:
-            ou.role = 3  # owner
-            ou.save()
-            print(f'Promoted {email} to owner')
-        elif created:
-            print(f'Added {email} to org as owner')
-        else:
-            print(f'{email}: already owner (role={ou.role})')
+        org_users = OrganizationUser.objects.filter(user=user)
+        for ou in org_users:
+            print(f'{email}: role={ou.role} (0=owner, 1=member)')
     except User.DoesNotExist:
         print(f'User {email} not found')
 "
