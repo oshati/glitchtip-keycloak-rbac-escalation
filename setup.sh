@@ -711,7 +711,10 @@ for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
     ou.role = 3  # 3=owner — THIS IS THE BREAKAGE
     ou.save()
 
-print('GlitchTip users configured.')
+# BREAKAGE: Remove alice from GlitchTip org (agent must re-add her as owner)
+alice_user = User.objects.get(email='alice@devops.local')
+OrganizationUser.objects.filter(organization=org, user=alice_user).delete()
+print('GlitchTip users configured. Alice removed from org.')
 " 2>/dev/null || echo "[setup] Warning: Django shell may have partial failure"
 
 ###############################################

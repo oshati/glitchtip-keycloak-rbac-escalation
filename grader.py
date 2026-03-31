@@ -82,8 +82,10 @@ def get_kc_admin_token(setup_info):
 def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
     """
     Get a user's OIDC token via the glitchtip client in the devops realm.
-    Uses default client scopes — does NOT explicitly request 'groups' scope.
-    The 'groups' scope must be a default client scope for groups to appear.
+    Requests scope 'openid profile email groups' — matching what GlitchTip
+    would send when OPENID_CONNECT_SCOPE is configured correctly.
+    The 'groups' scope must be available (default or optional) on the client
+    AND the mapper must have correct claim.name and full.path settings.
     If password fails, reset the user's password via admin API and retry.
     """
     kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
@@ -97,7 +99,8 @@ def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
         f'-d "client_secret={client_secret}" '
         f'-d "grant_type=password" '
         f'-d "username={username}" '
-        f'-d "password={password}"'
+        f'-d "password={password}" '
+        f'-d "scope=openid profile email groups"'
     )
 
     if stdout:
