@@ -1136,7 +1136,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: glitchtip
+      app.kubernetes.io/name: glitchtip
   policyTypes:
   - Egress
   egress:
