@@ -1287,13 +1287,13 @@ spec:
             - name: GT_DB_PASS
               valueFrom:
                 secretKeyRef:
-                  name: glitchtip-secrets
-                  key: SECRET_KEY
+                  name: glitchtip-postgresql
+                  key: postgres-password
 EOF
 
 # Patch the secret to also include the DB password for the CronJob
-GT_DB_PASS_CURRENT=$(kubectl get secret glitchtip-secrets -n glitchtip -o jsonpath='{.data.DATABASE_URL}' | base64 -d | sed -n 's|postgres://glitchtip:\([^@]*\)@.*|\1|p')
-kubectl patch secret glitchtip-secrets -n glitchtip --type merge -p "{\"stringData\":{\"GT_DB_PASS\":\"${GT_DB_PASS_CURRENT}\"}}" 2>/dev/null || true
+# Get DB password from the glitchtip-postgresql secret (1.1.0 base image)
+GT_DB_PASS_CURRENT=$(kubectl get secret glitchtip-postgresql -n glitchtip -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d || echo "${GT_DB_PASS}")
 
 ###############################################
 # DECOY CONFIGMAPS + DISTRACTION CONTENT
