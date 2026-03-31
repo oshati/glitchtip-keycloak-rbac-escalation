@@ -133,7 +133,7 @@ echo "[solution] Keycloak ingress NetworkPolicy fixed."
 
 # Verify connectivity
 echo "[solution] Verifying GlitchTip → Keycloak connectivity..."
-GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 
 for i in $(seq 1 30); do
   if kubectl exec -n glitchtip "${GT_POD}" -- python -c "import urllib.request; urllib.request.urlopen('http://keycloak.devops.local:8080/realms/master', timeout=5)" >/dev/null 2>&1; then
@@ -248,15 +248,15 @@ echo "[solution] Step 5: Demoting over-privileged users in GlitchTip..."
 
 # First, drop the PostgreSQL trigger that re-promotes users on UPDATE
 echo "[solution] Dropping database trigger AND rule that enforce owner role..."
-GT_PG_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U postgres -d postgres -c "
 DROP RULE IF EXISTS prevent_role_demotion ON organizations_ext_organizationuser;
 DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
 DROP FUNCTION IF EXISTS enforce_org_membership_policy();
 " 2>/dev/null || true
 echo "[solution] Database trigger and rule removed."
 
-GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 
 # Wait for pod to be ready
 kubectl wait --for=condition=ready pod "${GT_POD}" -n glitchtip --timeout=120s
@@ -326,7 +326,7 @@ echo "[solution] OIDC scope: ${SCOPE}"
 echo "[solution] Owner group: ${OWNER_GROUP}"
 
 # Check 4: Network connectivity
-GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 if kubectl exec -n glitchtip "${GT_POD}" -- python -c "import urllib.request; urllib.request.urlopen('http://keycloak.devops.local:8080/realms/master', timeout=5)" >/dev/null 2>&1; then
   echo "[solution] Network connectivity: OK"
 else

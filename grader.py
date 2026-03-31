@@ -169,7 +169,7 @@ def decode_jwt_groups(token):
 
 def get_glitchtip_pod():
     rc, gt_pod, _ = run_cmd(
-        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
+        "kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web "
         "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
     )
     return gt_pod.strip("'") if gt_pod else ""

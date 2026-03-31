@@ -130,14 +130,43 @@ until kubectl get nodes | grep -q " Ready"; do sleep 3; done
 kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
 
 ###############################################
-# DEPLOY GLITCHTIP STACK
+# CONFIGURE PRE-INSTALLED GLITCHTIP (1.1.0 base image)
 ###############################################
-kubectl create namespace glitchtip 2>/dev/null || true
-echo "[setup] Deploying GlitchTip stack..."
+echo "[setup] Configuring pre-installed GlitchTip..."
 
-GT_SECRET_KEY="gt-secret-key-abc123def456"
-GT_DB_PASS="glitchtipdb99"
+GT_DB_PASS="7KkJeWZYkK"
+GT_DB_USER="postgres"
+GT_DB_NAME="postgres"
+GT_DB_HOST="glitchtip-postgresql"
 
+# GlitchTip is pre-deployed in the 1.1.0 base image — just wait for it
+echo "[setup] Waiting for GlitchTip to be ready..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=glitchtip -n glitchtip --timeout=300s 2>/dev/null || true
+
+GLITCHTIP_URL="http://glitchtip.devops.local"
+for i in $(seq 1 60); do
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GLITCHTIP_URL}" 2>/dev/null || echo "000")
+  if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+    echo "[setup] GlitchTip is responding (HTTP ${HTTP_CODE})."
+    break
+  fi
+  sleep 5
+done
+
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
+
+# Run migrations (may already be done)
+echo "[setup] Running Django migrations..."
+kubectl exec -n glitchtip "${GT_POD}" -- python manage.py migrate --noinput 2>/dev/null || true
+
+# Create superuser
+echo "[setup] Creating superuser..."
+DJANGO_SUPERUSER_EMAIL=admin@devops.local DJANGO_SUPERUSER_PASSWORD=GlitchAdmin2024! \
+  kubectl exec -n glitchtip "${GT_POD}" -- env DJANGO_SUPERUSER_EMAIL=admin@devops.local DJANGO_SUPERUSER_PASSWORD=GlitchAdmin2024! \
+  python manage.py createsuperuser --noinput 2>/dev/null || true
+
+# SKIP the old deployment YAML — GlitchTip is already deployed
+if false; then
 kubectl apply --validate=false -f - <<GLITCHTIP_RESOURCES
 apiVersion: v1
 kind: Secret
@@ -414,12 +443,14 @@ for i in $(seq 1 90); do
 done
 
 # Run migrations and create superuser
-GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 echo "[setup] Running Django migrations..."
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py migrate --noinput 2>/dev/null || true
 
 echo "[setup] Creating superuser..."
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py createsuperuser --noinput 2>/dev/null || true
+fi
+# END of skipped old deployment block
 
 ###############################################
 # WAIT FOR KEYCLOAK
@@ -646,15 +677,17 @@ data:
 EOF
 
 # Patch GlitchTip web deployment to include OIDC config
+# Get the actual container name from the existing deployment
+GT_CONTAINER=$(kubectl get deployment glitchtip-web -n glitchtip -o jsonpath='{.spec.template.spec.containers[0].name}')
 kubectl patch deployment glitchtip-web -n glitchtip --type strategic -p '{
   "spec": {
     "template": {
       "spec": {
         "containers": [{
-          "name": "glitchtip",
+          "name": "'"${GT_CONTAINER}"'",
           "envFrom": [
-            {"configMapRef": {"name": "glitchtip-config"}},
-            {"secretRef": {"name": "glitchtip-secrets"}},
+            {"configMapRef": {"name": "glitchtip"}},
+            {"secretRef": {"name": "glitchtip"}},
             {"configMapRef": {"name": "glitchtip-oidc-config"}}
           ]
         }]
@@ -673,7 +706,7 @@ for i in $(seq 1 60); do
 done
 
 # Create GlitchTip org + users via Django
-GT_POD=$(kubectl get pods -n glitchtip -l app=glitchtip,component=web -o jsonpath='{.items[0].metadata.name}')
+GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 
 echo "[setup] Creating GlitchTip organization and users..."
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
@@ -1169,8 +1202,8 @@ EOF
 ###############################################
 echo "[setup] BREAKAGE 5: Creating database trigger for role enforcement..."
 
-GT_PG_POD=$(kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || kubectl get pods -n glitchtip -o name 2>/dev/null | grep postgres | head -1 | sed 's|pod/||')
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -c "
 CREATE OR REPLACE FUNCTION enforce_org_membership_policy()
 RETURNS TRIGGER AS \$\$
 BEGIN
@@ -1195,7 +1228,7 @@ CREATE TRIGGER org_membership_policy_trigger
 # BREAKAGE 5b: PostgreSQL RULE (harder to find than triggers)
 # Agent will find and drop the trigger but miss the RULE
 echo "[setup] Creating PostgreSQL RULE for role enforcement..."
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U glitchtip -d glitchtip -c "
+kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -c "
 CREATE OR REPLACE RULE prevent_role_demotion AS
 ON UPDATE TO organizations_ext_organizationuser
 WHERE (
@@ -1247,7 +1280,7 @@ spec:
             - -c
             - |
               echo "[cleanup] Starting periodic maintenance..."
-              PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgres -U glitchtip -d glitchtip -c \
+              PGPASSWORD="${GT_DB_PASS}" psql -h glitchtip-postgresql -U postgres -d postgres -c \
                 "DELETE FROM django_celery_results_taskresult WHERE date_done < NOW() - INTERVAL '7 days';" 2>/dev/null || true
               echo "[cleanup] Maintenance complete."
             env:
