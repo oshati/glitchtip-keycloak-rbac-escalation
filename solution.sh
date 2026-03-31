@@ -258,8 +258,9 @@ echo "[solution] Database trigger and rule removed."
 
 GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
 
-# Wait for pod to be ready
+# Wait for pod to be ready AND DNS to be available
 kubectl wait --for=condition=ready pod "${GT_POD}" -n glitchtip --timeout=120s
+sleep 15
 
 # Use Django management shell to fix roles
 kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
