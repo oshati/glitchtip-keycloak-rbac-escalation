@@ -130,7 +130,7 @@ def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
                 f'"{kc_url}/admin/realms/{realm}/users/{user_id}/reset-password" '
                 f'-d \'{{"type":"password","value":"{password}","temporary":false}}\''
             )
-            # Retry token
+            # Retry token (with same scope as initial request)
             rc, stdout, _ = run_cmd(
                 f'curl -s --connect-timeout 10 --max-time 15 -X POST '
                 f'"{kc_url}/realms/{realm}/protocol/openid-connect/token" '
@@ -138,7 +138,8 @@ def get_user_oidc_token(setup_info, username, password="DevOps2024!"):
                 f'-d "client_secret={client_secret}" '
                 f'-d "grant_type=password" '
                 f'-d "username={username}" '
-                f'-d "password={password}"'
+                f'-d "password={password}" '
+                f'-d "scope=openid profile email groups"'
             )
             if stdout:
                 try:
@@ -337,68 +338,8 @@ def check_drift_neutralized(setup_info):
         return 0.0, f"Groups re-corrupted (enforcer still active): {usernames}"
 
 
-def check_sso_path_repaired(setup_info):
-    """
-    FUNCTIONAL: GlitchTip pod can reach Keycloak OIDC discovery endpoint
-    AND only alice, bob are in the owners group.
-    """
-    realm = setup_info.get("KC_REALM", "devops")
-    owners_group_id = setup_info.get("OWNERS_GROUP_ID", "")
-
-    # Find GlitchTip pod
-    rc, gt_pod, _ = run_cmd(
-        "kubectl get pods -n glitchtip -l app=glitchtip,component=web "
-        "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
-    )
-    gt_pod = gt_pod.strip("'") if gt_pod else ""
-    if not gt_pod:
-        return 0.0, "No GlitchTip pod found"
-
-    # Test connectivity from inside the pod
-    connectivity_ok = False
-    for attempt in range(10):
-        for url in [
-            "http://keycloak.devops.local:8080",
-            "http://keycloak.keycloak.svc.cluster.local:8080",
-        ]:
-            rc, stdout, _ = run_cmd(
-                f"kubectl exec -n glitchtip {gt_pod} -- "
-                f"python -c \"import urllib.request; r = urllib.request.urlopen("
-                f"'{url}/realms/{realm}/.well-known/openid-configuration', timeout=5); "
-                f"print(r.status)\"",
-                timeout=15,
-            )
-            if rc == 0 and "200" in stdout:
-                connectivity_ok = True
-                break
-        if connectivity_ok:
-            break
-        time.sleep(3)
-
-    if not connectivity_ok:
-        return 0.0, "GlitchTip pod cannot reach Keycloak OIDC endpoint"
-
-    # Verify group membership via Keycloak API
-    kc_url = "http://keycloak.keycloak.svc.cluster.local:8080"
-    token = get_kc_admin_token(setup_info)
-    if not token or not owners_group_id:
-        return 0.0, "Connectivity OK but could not check groups"
-
-    rc, stdout, _ = run_cmd(
-        f'curl -s -H "Authorization: Bearer {token}" '
-        f'"{kc_url}/admin/realms/{realm}/groups/{owners_group_id}/members"'
-    )
-
-    try:
-        members = json.loads(stdout)
-        usernames = sorted([m["username"] for m in members])
-    except (json.JSONDecodeError, KeyError):
-        return 0.0, "Connectivity OK but failed to parse group members"
-
-    if usernames == ["alice", "bob"]:
-        return 1.0, f"Connectivity OK and owners group correct: {usernames}"
-    else:
-        return 0.0, f"Connectivity OK but owners group wrong: {usernames}"
+# check_sso_path_repaired removed — was dead code (never called, always failed due to
+# pod-level connectivity issue unrelated to agent actions)
 
 
 def check_identity_claims_correct(setup_info):
