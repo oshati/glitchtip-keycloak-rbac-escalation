@@ -277,7 +277,7 @@ for email in alice@devops.local bob@devops.local; do
     # Check if already in org
     EXISTS=$(gt_sql "SELECT COUNT(*) FROM organizations_ext_organizationuser WHERE user_id = ${USER_ID} AND organization_id = ${ORG_ID};")
     if [ "$EXISTS" = "0" ]; then
-      gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email) VALUES (${ORG_ID}, ${USER_ID}, 3, '${email}');"
+      gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email, created, modified) VALUES (${ORG_ID}, ${USER_ID}, 3, '${email}', NOW(), NOW());"
       echo "[solution] Added ${email} to org as owner"
     else
       gt_sql "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id = ${USER_ID} AND organization_id = ${ORG_ID};"

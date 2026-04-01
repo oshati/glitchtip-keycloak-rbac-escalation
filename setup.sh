@@ -721,8 +721,8 @@ gt_sql "INSERT INTO users_user (email, password, is_staff, is_superuser, is_acti
   ON CONFLICT (email) DO NOTHING;"
 
 # Create organization
-gt_sql "INSERT INTO organizations_ext_organization (name, slug, created, is_accepting_events, open_membership, scrub_ip_addresses, event_throttle_rate)
-  VALUES ('DevOps Platform', 'devops-platform', NOW(), true, false, false, 0)
+gt_sql "INSERT INTO organizations_ext_organization (name, slug, created, modified, is_active, is_accepting_events, open_membership, scrub_ip_addresses, event_throttle_rate, stripe_customer_id)
+  VALUES ('DevOps Platform', 'devops-platform', NOW(), NOW(), true, true, false, false, 0, '')
   ON CONFLICT (slug) DO NOTHING;"
 
 ORG_ID=$(gt_sql "SELECT id FROM organizations_ext_organization WHERE slug='devops-platform' LIMIT 1;")
@@ -742,9 +742,9 @@ for username in alice bob charlie diana eve; do
 
   USER_ID=$(gt_sql "SELECT id FROM users_user WHERE email='${username}@devops.local' LIMIT 1;")
 
-  gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email)
-    VALUES (${ORG_ID}, ${USER_ID}, 3, '${username}@devops.local')
-    ON CONFLICT DO NOTHING;" 2>/dev/null || true
+  gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email, created, modified)
+    VALUES (${ORG_ID}, ${USER_ID}, 3, '${username}@devops.local', NOW(), NOW())
+    ON CONFLICT (user_id, organization_id) DO UPDATE SET role = 3;" 2>/dev/null || true
 
   # Force role to 3 (owner) — THE BREAKAGE
   gt_sql "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id = ${USER_ID};"
