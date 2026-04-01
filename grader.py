@@ -182,9 +182,6 @@ def reset_glitchtip_local_password(email, password="DevOps2024!"):
         return False, "No GlitchTip pod found"
 
     script = (
-        "import os, django\n"
-        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'glitchtip.settings')\n"
-        "django.setup()\n"
         "from django.contrib.auth import get_user_model\n"
         "User = get_user_model()\n"
         f'user = User.objects.filter(email="{email}").first()\n'
@@ -200,7 +197,8 @@ def reset_glitchtip_local_password(email, password="DevOps2024!"):
     run_cmd(f"kubectl cp /tmp/gt_reset_pw.py glitchtip/{gt_pod}:/tmp/gt_reset_pw.py", timeout=10)
 
     rc, stdout, stderr = run_cmd(
-        f"kubectl exec -n glitchtip {gt_pod} -- python /tmp/gt_reset_pw.py",
+        f"kubectl exec -n glitchtip {gt_pod} -- "
+        f"bash -c 'cd /code && cat /tmp/gt_reset_pw.py | python manage.py shell'",
         timeout=30,
     )
     if rc != 0:
@@ -214,9 +212,6 @@ def glitchtip_team_exists(org_slug, team_slug):
         return False, "No GlitchTip pod found"
 
     script = (
-        "import os, django\n"
-        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'glitchtip.settings')\n"
-        "django.setup()\n"
         "from apps.teams.models import Team\n"
         f'exists = Team.objects.filter(slug="{team_slug}", organization__slug="{org_slug}").exists()\n'
         "print('1' if exists else '0')\n"
@@ -228,7 +223,8 @@ def glitchtip_team_exists(org_slug, team_slug):
     run_cmd(f"kubectl cp /tmp/gt_team_check.py glitchtip/{gt_pod}:/tmp/gt_team_check.py", timeout=10)
 
     rc, stdout, stderr = run_cmd(
-        f"kubectl exec -n glitchtip {gt_pod} -- python /tmp/gt_team_check.py",
+        f"kubectl exec -n glitchtip {gt_pod} -- "
+        f"bash -c 'cd /code && cat /tmp/gt_team_check.py | python manage.py shell'",
         timeout=30,
     )
     if rc != 0:
