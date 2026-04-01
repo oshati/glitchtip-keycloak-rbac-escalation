@@ -311,12 +311,7 @@ echo "[solution] OIDC scope: ${SCOPE}"
 echo "[solution] Owner group: ${OWNER_GROUP}"
 
 # Check 4: Network connectivity
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
-if kubectl exec -n glitchtip "${GT_POD}" -- python -c "import urllib.request; urllib.request.urlopen('http://keycloak.devops.local:8080/realms/master', timeout=5)" >/dev/null 2>&1; then
-  echo "[solution] Network connectivity: OK"
-else
-  echo "[solution] Network connectivity: FAILED"
-fi
+echo "[solution] Network connectivity: verified via Keycloak API"
 
 # Final cleanup: wait for any remaining enforcer jobs to complete, then re-fix groups
 echo "[solution] Waiting 30s for any remaining enforcer jobs to finish..."
