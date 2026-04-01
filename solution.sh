@@ -285,7 +285,6 @@ for email in alice@devops.local bob@devops.local; do
     fi
   fi
 done
-"
 
 echo "[solution] User roles corrected."
 
