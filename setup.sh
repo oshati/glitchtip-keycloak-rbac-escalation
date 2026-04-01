@@ -1209,10 +1209,10 @@ EOF
 ###############################################
 echo "[setup] BREAKAGE 5: Creating database trigger for role enforcement..."
 
-GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || kubectl get pods -n glitchtip -l app=glitchtip-postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || kubectl get pods -n glitchtip -o name 2>/dev/null | grep postgres | head -1 | sed 's|pod/||')
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -c "
+# Write SQL to a temp file to avoid quoting hell
+cat > /tmp/gt_trigger.sql << 'TRIGGER_SQL'
 CREATE OR REPLACE FUNCTION enforce_org_membership_policy()
-RETURNS TRIGGER AS \$\$
+RETURNS TRIGGER AS $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM users_user u
@@ -1223,19 +1223,23 @@ BEGIN
   END IF;
   RETURN NEW;
 END;
-\$\$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
 CREATE TRIGGER org_membership_policy_trigger
   BEFORE UPDATE ON organizations_ext_organizationuser
   FOR EACH ROW
   EXECUTE FUNCTION enforce_org_membership_policy();
-" 2>/dev/null || echo "[setup] Warning: trigger creation may have failed"
+TRIGGER_SQL
+
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+kubectl cp /tmp/gt_trigger.sql glitchtip/${GT_PG_POD}:/tmp/gt_trigger.sql
+kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -f /tmp/gt_trigger.sql" 2>/dev/null || echo "[setup] Warning: trigger creation may have failed"
 
 # BREAKAGE 5b: PostgreSQL RULE (harder to find than triggers)
 # Agent will find and drop the trigger but miss the RULE
 echo "[setup] Creating PostgreSQL RULE for role enforcement..."
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -c "
+cat > /tmp/gt_rule.sql << 'RULE_SQL'
 CREATE OR REPLACE RULE prevent_role_demotion AS
 ON UPDATE TO organizations_ext_organizationuser
 WHERE (
@@ -1244,7 +1248,10 @@ WHERE (
   AND NEW.role != 3
 )
 DO INSTEAD NOTHING;
-" 2>/dev/null || echo "[setup] Warning: rule creation may have failed"
+RULE_SQL
+
+kubectl cp /tmp/gt_rule.sql glitchtip/${GT_PG_POD}:/tmp/gt_rule.sql
+kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -f /tmp/gt_rule.sql" 2>/dev/null || echo "[setup] Warning: rule creation may have failed"
 echo "[setup] Database RULE installed."
 
 echo "[setup] Database trigger installed."
