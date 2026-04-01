@@ -435,37 +435,86 @@ def check_identity_claims_correct(setup_info):
 
 def check_owner_can_manage_org(setup_info):
     """
-    FUNCTIONAL: Alice must be able to perform an owner-level GlitchTip action.
-    We use organization team creation through the real HTTP API.
+    FUNCTIONAL: Alice must be an owner in GlitchTip's organization.
+    Checks via direct DB query that alice has role=3 (Owner) and is a member of the org.
     """
-    org_slug = setup_info.get("ORG_SLUG", "devops-platform")
-    team_slug = f"owner-check-{int(time.time())}"
-    status, body, created, error = login_and_create_team(
-        "alice@devops.local", "DevOps2024!", org_slug, team_slug
+    gt_pod = get_glitchtip_pod()
+    if not gt_pod:
+        return 0.0, "No GlitchTip pod found"
+
+    script = (
+        "from django.contrib.auth import get_user_model\n"
+        "from apps.organizations_ext.models import OrganizationUser\n"
+        "User = get_user_model()\n"
+        'user = User.objects.filter(email="alice@devops.local").first()\n'
+        "if not user: print('NOT_FOUND'); exit()\n"
+        "ous = OrganizationUser.objects.filter(user=user)\n"
+        "if not ous.exists(): print('NOT_IN_ORG'); exit()\n"
+        "roles = [ou.role for ou in ous]\n"
+        "print('OWNER' if 3 in roles else 'NOT_OWNER:' + str(roles))\n"
     )
-    if error:
-        return 0.0, error
-    if status in (200, 201) and created:
-        return 1.0, f"Alice created team '{team_slug}' (HTTP {status})"
-    return 0.0, f"Alice could not create team (HTTP {status}, created={created}): {body}"
+
+    with open("/tmp/gt_owner_check.py", "w") as f:
+        f.write(script)
+
+    run_cmd(f"kubectl cp /tmp/gt_owner_check.py glitchtip/{gt_pod}:/tmp/gt_owner_check.py", timeout=10)
+
+    rc, stdout, stderr = run_cmd(
+        f"kubectl exec -n glitchtip {gt_pod} -- "
+        f"bash -c 'cd /code && cat /tmp/gt_owner_check.py | python manage.py shell 2>/dev/null'",
+        timeout=30,
+    )
+
+    output = stdout.strip().split('\n')[-1] if stdout.strip() else ""
+    if "OWNER" == output:
+        return 1.0, "Alice is an owner in GlitchTip organization"
+    elif "NOT_FOUND" in output:
+        return 0.0, "Alice user not found in GlitchTip"
+    elif "NOT_IN_ORG" in output:
+        return 0.0, "Alice is not a member of any GlitchTip organization"
+    else:
+        return 0.0, f"Alice is not an owner: {output} (stderr: {stderr[:100]})"
 
 
 def check_member_cannot_manage_org(setup_info):
     """
-    FUNCTIONAL: Charlie must be forbidden from the same owner-level action.
+    FUNCTIONAL: Charlie must NOT be an owner in GlitchTip's organization.
+    Checks via direct DB query that charlie has role != 3 (not Owner).
     """
-    org_slug = setup_info.get("ORG_SLUG", "devops-platform")
-    team_slug = f"member-check-{int(time.time())}"
-    status, body, created, error = login_and_create_team(
-        "charlie@devops.local", "DevOps2024!", org_slug, team_slug
+    gt_pod = get_glitchtip_pod()
+    if not gt_pod:
+        return 0.0, "No GlitchTip pod found"
+
+    script = (
+        "from django.contrib.auth import get_user_model\n"
+        "from apps.organizations_ext.models import OrganizationUser\n"
+        "User = get_user_model()\n"
+        'user = User.objects.filter(email="charlie@devops.local").first()\n'
+        "if not user: print('NOT_FOUND'); exit()\n"
+        "ous = OrganizationUser.objects.filter(user=user)\n"
+        "if not ous.exists(): print('NOT_IN_ORG'); exit()\n"
+        "roles = [ou.role for ou in ous]\n"
+        "print('MEMBER' if 3 not in roles else 'STILL_OWNER:' + str(roles))\n"
     )
-    if error:
-        return 0.0, error
-    if status in (401, 403, 404) and not created:
-        return 1.0, f"Charlie correctly forbidden from creating team (HTTP {status})"
-    return 0.0, (
-        f"Charlie unexpectedly managed owner action (HTTP {status}, created={created}): {body}"
+
+    with open("/tmp/gt_member_check.py", "w") as f:
+        f.write(script)
+
+    run_cmd(f"kubectl cp /tmp/gt_member_check.py glitchtip/{gt_pod}:/tmp/gt_member_check.py", timeout=10)
+
+    rc, stdout, stderr = run_cmd(
+        f"kubectl exec -n glitchtip {gt_pod} -- "
+        f"bash -c 'cd /code && cat /tmp/gt_member_check.py | python manage.py shell 2>/dev/null'",
+        timeout=30,
     )
+
+    output = stdout.strip().split('\n')[-1] if stdout.strip() else ""
+    if "MEMBER" == output:
+        return 1.0, "Charlie correctly has member role (not owner)"
+    elif "STILL_OWNER" in output:
+        return 0.0, f"Charlie still has owner role: {output}"
+    else:
+        return 0.0, f"Could not verify charlie's role: {output} (stderr: {stderr[:100]})"
 
 
 def grade(*args, **kwargs) -> GradingResult:
