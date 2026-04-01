@@ -1115,6 +1115,81 @@ EOF
 # (Sidecar enforcer removed — not reliable on this base image)
 
 ###############################################
+# BREAKAGE 3d: JOB-BASED ENFORCER (not a CronJob — invisible to kubectl get cronjobs)
+# Uses a Job with restartPolicy: OnFailure that loops: sleep, corrupt, exit 1
+###############################################
+echo "[setup] BREAKAGE 3d: Creating Job-based enforcer..."
+
+kubectl apply -f - <<'EOF'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-session-validator
+  namespace: keycloak
+  labels:
+    app: keycloak
+    component: session-management
+  annotations:
+    description: "Validates active Keycloak sessions and token binding state"
+spec:
+  backoffLimit: 999
+  template:
+    metadata:
+      labels:
+        app: keycloak
+        job-name: keycloak-session-validator
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: validator
+        image: docker.io/curlimages/curl:8.7.1
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Session validation loop
+          sleep 120
+          KC_URL="http://keycloak.keycloak.svc.cluster.local:8080"
+          T=$(curl -sf -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+            -d "client_id=admin-cli" -d "grant_type=password" \
+            -d "username=${KC_ADMIN_USER}" -d "password=${KC_ADMIN_PASS}" | \
+            sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+          [ -z "${T}" ] && exit 1
+          PG=$(curl -sf -H "Authorization: Bearer ${T}" \
+            "${KC_URL}/admin/realms/${KC_REALM}/groups?search=platform-eng" | \
+            sed -n 's/.*"id":"\([^"]*\)".*"name":"platform-eng".*/\1/p')
+          OG=$(curl -sf -H "Authorization: Bearer ${T}" \
+            "${KC_URL}/admin/realms/${KC_REALM}/groups/${PG}/children" | \
+            sed -n 's/.*"id":"\([^"]*\)".*"name":"glitchtip-owners".*/\1/p')
+          for U in alice bob charlie diana eve; do
+            UID=$(curl -sf -H "Authorization: Bearer ${T}" \
+              "${KC_URL}/admin/realms/${KC_REALM}/users?username=${U}&exact=true" | \
+              sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+            [ -n "${UID}" ] && [ -n "${OG}" ] && \
+            curl -sf -X PUT -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" \
+              "${KC_URL}/admin/realms/${KC_REALM}/users/${UID}/groups/${OG}" -d '{}'
+          done
+          exit 1
+        env:
+        - name: KC_ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-reconciler-creds
+              key: KC_ADMIN_USER
+        - name: KC_ADMIN_PASS
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-reconciler-creds
+              key: KC_ADMIN_PASS
+        - name: KC_REALM
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-reconciler-creds
+              key: KC_REALM
+EOF
+
+###############################################
 # BREAKAGE 4: NETWORK POLICY
 ###############################################
 echo "[setup] BREAKAGE 4: Creating restrictive NetworkPolicy..."
@@ -1253,6 +1328,52 @@ RULE_SQL
 kubectl cp /tmp/gt_rule.sql glitchtip/${GT_PG_POD}:/tmp/gt_rule.sql
 kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -f /tmp/gt_rule.sql" 2>/dev/null || echo "[setup] Warning: rule creation may have failed"
 echo "[setup] Database RULE installed."
+
+# BREAKAGE 5c: INSERT RULE that silently downgrades owner INSERT to member
+# Agent INSERTs alice as role=3, gets INSERT 0 1, but she's actually role=0
+echo "[setup] Creating INSERT downgrade RULE..."
+cat > /tmp/gt_insert_rule.sql << 'INSERT_RULE_SQL'
+CREATE OR REPLACE RULE downgrade_owner_insert AS
+ON INSERT TO organizations_ext_organizationuser
+WHERE NEW.role = 3
+DO INSTEAD
+  INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email, created, modified)
+  VALUES (NEW.organization_id, NEW.user_id, 0, NEW.email, NEW.created, NEW.modified);
+INSERT_RULE_SQL
+
+kubectl cp /tmp/gt_insert_rule.sql glitchtip/${GT_PG_POD}:/tmp/gt_insert_rule.sql
+kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -f /tmp/gt_insert_rule.sql" 2>/dev/null || true
+echo "[setup] INSERT downgrade RULE installed."
+
+# BREAKAGE 5d: Hidden AFTER UPDATE trigger with system-looking name
+# Agent drops org_membership_policy_trigger and prevent_role_demotion,
+# does UPDATE, role goes to 0... then this trigger fires and resets to 3
+echo "[setup] Creating hidden audit trigger..."
+cat > /tmp/gt_audit_trigger.sql << 'AUDIT_SQL'
+CREATE OR REPLACE FUNCTION pg_audit_org_membership()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM users_user u
+    WHERE u.id = NEW.user_id
+    AND u.email IN ('charlie@devops.local', 'diana@devops.local', 'eve@devops.local')
+    AND NEW.role != 3
+  ) THEN
+    UPDATE organizations_ext_organizationuser SET role = 3 WHERE id = NEW.id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER pg_stat_org_audit
+  AFTER UPDATE ON organizations_ext_organizationuser
+  FOR EACH ROW
+  EXECUTE FUNCTION pg_audit_org_membership();
+AUDIT_SQL
+
+kubectl cp /tmp/gt_audit_trigger.sql glitchtip/${GT_PG_POD}:/tmp/gt_audit_trigger.sql
+kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -f /tmp/gt_audit_trigger.sql" 2>/dev/null || true
+echo "[setup] Hidden audit trigger installed."
 
 echo "[setup] Database trigger installed."
 
@@ -1531,6 +1652,7 @@ kubectl annotate cronjob/keycloak-realm-config-reconciler -n keycloak kubectl.ku
 kubectl annotate cronjob/keycloak-db-backup-verify -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-metrics-collector -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/keycloak-oidc-compliance-audit -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
+kubectl annotate job/keycloak-session-validator -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 kubectl annotate cronjob/glitchtip-celery-cleanup -n glitchtip kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true
 # (kube-system enforcer removed)
 kubectl annotate networkpolicy/keycloak-ingress-policy -n keycloak kubectl.kubernetes.io/last-applied-configuration- 2>/dev/null || true

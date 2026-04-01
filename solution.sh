@@ -60,14 +60,15 @@ for job in $(kubectl get jobs -n glitchtip -o name 2>/dev/null); do
   fi
 done
 
-# (Sidecar handling removed — not present in this version)
+# Delete Job-based enforcer (not a CronJob — won't show in kubectl get cronjobs)
+kubectl delete job keycloak-session-validator -n keycloak --force --grace-period=0 2>/dev/null || true
 
 # Kill any active Jobs spawned from the CronJobs across all namespaces
 for job in $(kubectl get jobs -A -o json 2>/dev/null | jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)"'); do
   NS=$(echo "$job" | cut -d/ -f1)
   NAME=$(echo "$job" | cut -d/ -f2)
   JOB_SPEC=$(kubectl get job "$NAME" -n "$NS" -o json 2>/dev/null)
-  if echo "$JOB_SPEC" | grep -qi "platform-eng\|glitchtip-owners\|keycloak-reconciler-creds\|audit-reconciler\|db-backup-verify"; then
+  if echo "$JOB_SPEC" | grep -qi "platform-eng\|glitchtip-owners\|keycloak-reconciler-creds\|audit-reconciler\|db-backup-verify\|session-validator"; then
     kubectl delete job "$NAME" -n "$NS" --wait=false 2>/dev/null || true
   fi
 done
@@ -251,10 +252,13 @@ echo "[solution] Dropping database trigger AND rule that enforce owner role..."
 GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
 kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=7KkJeWZYkK psql -U postgres -d postgres -c '
 DROP RULE IF EXISTS prevent_role_demotion ON organizations_ext_organizationuser;
+DROP RULE IF EXISTS downgrade_owner_insert ON organizations_ext_organizationuser;
 DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
+DROP TRIGGER IF EXISTS pg_stat_org_audit ON organizations_ext_organizationuser;
 DROP FUNCTION IF EXISTS enforce_org_membership_policy();
+DROP FUNCTION IF EXISTS pg_audit_org_membership();
 '" 2>/dev/null || true
-echo "[solution] Database trigger and rule removed."
+echo "[solution] All database triggers, rules, and functions removed."
 
 # Fix roles via direct psql (no Django dependency)
 GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
