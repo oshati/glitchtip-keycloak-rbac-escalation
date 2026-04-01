@@ -448,12 +448,20 @@ def _query_user_role(email):
     if not pg_pod:
         return None, "No PostgreSQL pod found"
 
+    # Write SQL to a temp file and execute with password via env
+    sql = (
+        f"SELECT role FROM organizations_ext_organizationuser ou "
+        f"JOIN users_user u ON ou.user_id = u.id "
+        f"WHERE u.email = '{email}' LIMIT 1;"
+    )
+    with open("/tmp/gt_role_query.sql", "w") as f:
+        f.write(sql)
+
+    run_cmd(f"kubectl cp /tmp/gt_role_query.sql glitchtip/{pg_pod}:/tmp/gt_role_query.sql", timeout=10)
+
     rc, stdout, stderr = run_cmd(
         f"kubectl exec -n glitchtip {pg_pod} -- "
-        f'psql -U postgres -d postgres -tAc '
-        f'"SELECT role FROM organizations_ext_organizationuser ou '
-        f"JOIN users_user u ON ou.user_id = u.id "
-        f"WHERE u.email = '{email}' LIMIT 1;\"",
+        f"bash -c 'PGPASSWORD=7KkJeWZYkK psql -U postgres -d postgres -tAf /tmp/gt_role_query.sql'",
         timeout=15,
     )
 
