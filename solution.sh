@@ -256,51 +256,35 @@ DROP FUNCTION IF EXISTS enforce_org_membership_policy();
 " 2>/dev/null || true
 echo "[solution] Database trigger and rule removed."
 
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
+# Fix roles via direct psql (no Django dependency)
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
 
-# Wait for pod to be ready AND DNS to be available
-kubectl wait --for=condition=ready pod "${GT_POD}" -n glitchtip --timeout=120s
-sleep 15
-
-# Use Django management shell to fix roles
-kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
-from django.contrib.auth import get_user_model
-from apps.organizations_ext.models import OrganizationUser
-
-User = get_user_model()
+gt_sql() {
+  kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=7KkJeWZYkK psql -U postgres -d postgres -tAc \"$1\"" 2>/dev/null
+}
 
 # Demote charlie, diana, eve to member (role=0)
-for email in ['charlie@devops.local', 'diana@devops.local', 'eve@devops.local']:
-    try:
-        user = User.objects.get(email=email)
-        org_users = OrganizationUser.objects.filter(user=user)
-        for ou in org_users:
-            if ou.role == 3:  # owner
-                ou.role = 0   # member
-                ou.save()
-                print(f'Demoted {email} from owner to member')
-    except User.DoesNotExist:
-        print(f'User {email} not found')
+for email in charlie@devops.local diana@devops.local eve@devops.local; do
+  gt_sql "UPDATE organizations_ext_organizationuser SET role = 0 WHERE user_id = (SELECT id FROM users_user WHERE email = '${email}');"
+  echo "[solution] Demoted ${email} to member"
+done
 
 # Ensure alice and bob are owners (alice may have been removed from org)
-from apps.organizations_ext.models import Organization
-org = Organization.objects.first()
-for email in ['alice@devops.local', 'bob@devops.local']:
-    try:
-        user = User.objects.get(email=email)
-        ou, created = OrganizationUser.objects.get_or_create(
-            organization=org, user=user, defaults={'role': 3}
-        )
-        if ou.role != 3:
-            ou.role = 3  # owner
-            ou.save()
-            print(f'Promoted {email} to owner')
-        elif created:
-            print(f'Added {email} to org as owner')
-        else:
-            print(f'{email}: already owner (role={ou.role})')
-    except User.DoesNotExist:
-        print(f'User {email} not found')
+ORG_ID=$(gt_sql "SELECT id FROM organizations_ext_organization LIMIT 1;")
+for email in alice@devops.local bob@devops.local; do
+  USER_ID=$(gt_sql "SELECT id FROM users_user WHERE email = '${email}';")
+  if [ -n "$USER_ID" ] && [ -n "$ORG_ID" ]; then
+    # Check if already in org
+    EXISTS=$(gt_sql "SELECT COUNT(*) FROM organizations_ext_organizationuser WHERE user_id = ${USER_ID} AND organization_id = ${ORG_ID};")
+    if [ "$EXISTS" = "0" ]; then
+      gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email) VALUES (${ORG_ID}, ${USER_ID}, 3, '${email}');"
+      echo "[solution] Added ${email} to org as owner"
+    else
+      gt_sql "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id = ${USER_ID} AND organization_id = ${ORG_ID};"
+      echo "[solution] Ensured ${email} is owner"
+    fi
+  fi
+done
 "
 
 echo "[solution] User roles corrected."

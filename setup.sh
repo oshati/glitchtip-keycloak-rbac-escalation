@@ -705,50 +705,57 @@ for i in $(seq 1 60); do
   sleep 5
 done
 
-# Create GlitchTip org + users via Django
-GT_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=glitchtip,app.kubernetes.io/component=web -o jsonpath='{.items[0].metadata.name}')
+# Create GlitchTip org + users via raw SQL (no Django dependency)
+echo "[setup] Creating GlitchTip organization and users via psql..."
 
-echo "[setup] Creating GlitchTip organization and users..."
-kubectl exec -n glitchtip "${GT_POD}" -- python manage.py shell -c "
-from django.contrib.auth import get_user_model
-User = get_user_model()
+GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 
-# Ensure admin exists
-admin = User.objects.filter(email='admin@devops.local').first()
-if not admin:
-    admin = User.objects.create_superuser(email='admin@devops.local', password='GlitchAdmin2024!')
+gt_sql() {
+  kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=${GT_DB_PASS} psql -U ${GT_DB_USER} -d ${GT_DB_NAME} -tAc \"$1\"" 2>/dev/null
+}
 
-# Create org
-from apps.organizations_ext.models import Organization, OrganizationUser
-org, _ = Organization.objects.get_or_create(
-    slug='devops-platform',
-    defaults={'name': 'DevOps Platform'}
-)
-if org.name != 'DevOps Platform':
-    org.name = 'DevOps Platform'
-    org.save(update_fields=['name'])
-OrganizationUser.objects.get_or_create(organization=org, user=admin, defaults={'role': 3})
+# Create admin user (dummy password hash — not needed for grading)
+DUMMY_PW='pbkdf2_sha256\$600000\$salt\$hash'
+gt_sql "INSERT INTO users_user (email, password, is_staff, is_superuser, is_active, created, name, subscribe_by_default, options)
+  VALUES ('admin@devops.local', '${DUMMY_PW}', true, true, true, NOW(), 'Admin', true, '{}')
+  ON CONFLICT (email) DO NOTHING;"
 
-# Create users — ALL as owners (breakage)
-for username in ['alice', 'bob', 'charlie', 'diana', 'eve']:
-    user, created = User.objects.get_or_create(
-        email=f'{username}@devops.local',
-        defaults={'is_staff': False, 'is_superuser': False}
-    )
-    if created:
-        user.set_password('DevOps2024!')
-        user.save()
-    ou, _ = OrganizationUser.objects.get_or_create(
-        organization=org, user=user, defaults={'role': 3}
-    )
-    ou.role = 3  # 3=owner — THIS IS THE BREAKAGE
-    ou.save()
+# Create organization
+gt_sql "INSERT INTO organizations_ext_organization (name, slug, created, is_accepting_events, open_membership, scrub_ip_addresses, event_throttle_rate)
+  VALUES ('DevOps Platform', 'devops-platform', NOW(), true, false, false, 0)
+  ON CONFLICT (slug) DO NOTHING;"
+
+ORG_ID=$(gt_sql "SELECT id FROM organizations_ext_organization WHERE slug='devops-platform' LIMIT 1;")
+echo "[setup] Org ID: ${ORG_ID}"
+
+# Add admin to org as owner
+ADMIN_ID=$(gt_sql "SELECT id FROM users_user WHERE email='admin@devops.local' LIMIT 1;")
+gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email)
+  VALUES (${ORG_ID}, ${ADMIN_ID}, 3, 'admin@devops.local')
+  ON CONFLICT DO NOTHING;" 2>/dev/null || true
+
+# Create 5 users — ALL as owners (breakage)
+for username in alice bob charlie diana eve; do
+  gt_sql "INSERT INTO users_user (email, password, is_staff, is_superuser, is_active, created, name, subscribe_by_default, options)
+    VALUES ('${username}@devops.local', '${DUMMY_PW}', false, false, true, NOW(), '${username}', true, '{}')
+    ON CONFLICT (email) DO NOTHING;"
+
+  USER_ID=$(gt_sql "SELECT id FROM users_user WHERE email='${username}@devops.local' LIMIT 1;")
+
+  gt_sql "INSERT INTO organizations_ext_organizationuser (organization_id, user_id, role, email)
+    VALUES (${ORG_ID}, ${USER_ID}, 3, '${username}@devops.local')
+    ON CONFLICT DO NOTHING;" 2>/dev/null || true
+
+  # Force role to 3 (owner) — THE BREAKAGE
+  gt_sql "UPDATE organizations_ext_organizationuser SET role = 3 WHERE user_id = ${USER_ID};"
+
+  echo "[setup] Created user ${username} (id=${USER_ID}) as owner"
+done
 
 # BREAKAGE: Remove alice from GlitchTip org (agent must re-add her as owner)
-alice_user = User.objects.get(email='alice@devops.local')
-OrganizationUser.objects.filter(organization=org, user=alice_user).delete()
-print('GlitchTip users configured. Alice removed from org.')
-" 2>/dev/null || echo "[setup] Warning: Django shell may have partial failure"
+ALICE_ID=$(gt_sql "SELECT id FROM users_user WHERE email='alice@devops.local' LIMIT 1;")
+gt_sql "DELETE FROM organizations_ext_organizationuser WHERE user_id = ${ALICE_ID};"
+echo "[setup] Alice removed from org."
 
 ###############################################
 # BREAKAGE 1: KEYCLOAK GROUP MEMBERSHIPS
