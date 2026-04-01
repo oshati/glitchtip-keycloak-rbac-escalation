@@ -249,11 +249,11 @@ echo "[solution] Step 5: Demoting over-privileged users in GlitchTip..."
 # First, drop the PostgreSQL trigger that re-promotes users on UPDATE
 echo "[solution] Dropping database trigger AND rule that enforce owner role..."
 GT_PG_POD=$(kubectl get pods -n glitchtip -l app.kubernetes.io/name=postgresql -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n glitchtip "${GT_PG_POD}" -- psql -U postgres -d postgres -c "
+kubectl exec -n glitchtip "${GT_PG_POD}" -- bash -c "PGPASSWORD=7KkJeWZYkK psql -U postgres -d postgres -c '
 DROP RULE IF EXISTS prevent_role_demotion ON organizations_ext_organizationuser;
 DROP TRIGGER IF EXISTS org_membership_policy_trigger ON organizations_ext_organizationuser;
 DROP FUNCTION IF EXISTS enforce_org_membership_policy();
-" 2>/dev/null || true
+'" 2>/dev/null || true
 echo "[solution] Database trigger and rule removed."
 
 # Fix roles via direct psql (no Django dependency)
